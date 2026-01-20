@@ -56,37 +56,3 @@ source venv/bin/activate
 
 # 3. Installa dipendenze / Install dependencies
 pip install PySide6 librosa matplotlib pydub soundfile panns-inference torch numpy
-3. Avvio / Run
-Bash
-python app_desktop.py
-🛠️ COME COMPILARE / BUILD GUIDE
-Segui questi passaggi se vuoi creare il pacchetto distribuibile (.tar.gz) usando lo script incluso. Follow these steps to create the standalone distribution package (.tar.gz) using the included script.
-
-1. Installa PyInstaller
-Bash
-# Assicurati di essere nel venv / Ensure venv is active
-pip install pyinstaller
-2. Esegui lo Script di Build / Run Build Script
-Abbiamo incluso uno script (build_rndsnd.sh) che pulisce, compila, crea il README e comprime tutto automaticamente. We included a script that automates cleanup, compilation, README generation, and compression.
-
-Bash
-# Rendi lo script eseguibile / Make executable
-chmod +x build_rndsnd.sh
-
-# Lancia la build / Run build
-./build_rndsnd.sh
-3. Risultato / Output
-Troverai il file rndsnd_v0.6.5_linux_x64.tar.gz nella cartella principale del progetto. You will find the ready-to-ship package in the main project folder.
-
-ℹ️ NOTE IMPORTANTI / IMPORTANT NOTES
-[IT] Primo Avvio IA Il modello neurale (Cnn14) non è incluso nel codice sorgente. La prima volta che userai la funzione "Analizza Libreria", l'app scaricherà automaticamente 312MB. È necessaria una connessione internet.
-
-[EN] First AI Run The neural model (Cnn14) is not included in the source code. The first time you use "Analyze Library", the app will automatically download 312MB. Internet connection required.
-
-⚠️ DISCLAIMER
-[IT] Questo è un software sperimentale fornito "così com'è", senza alcuna garanzia. L'autore non è responsabile per eventuali perdite di dati, crash di sistema o altri problemi derivanti dall'uso di questa applicazione. Usalo a tuo rischio e pericolo. Fai sempre un backup dei tuoi file audio prima di processarli.
-
-[EN] This is experimental software provided "as is", without warranty of any kind. The author is not responsible for any data loss, system crashes, or other issues resulting from the use of this application. Use at your own risk. Always backup your audio files before processing.
-
-License
-MIT License.
