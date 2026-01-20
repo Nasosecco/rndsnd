@@ -1,7 +1,8 @@
 # 🔊 rndsnd v0.6.5
 ### AI-Powered Audio Manager & Generative Mixer
 
-![Splash Screen](rndsnd_splash.png)
+<img width="2784" height="1536" alt="rndsnd_splash" src="https://github.com/user-attachments/assets/ec988017-89df-4d74-9bc6-4453089f3711" />
+
 
 >  Una workstation audio desktop che utilizza l'IA per catalogare automaticamente i campioni, generare mix creativi e velocizzare il workflow.
 >
