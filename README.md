@@ -83,5 +83,10 @@ Troverai il file rndsnd_v0.6.5_linux_x64.tar.gz nella cartella principale del pr
 
 [EN] First AI Run The neural model (Cnn14) is not included in the source code. The first time you use "Analyze Library", the app will automatically download 312MB. Internet connection required.
 
+⚠️ DISCLAIMER
+[IT] Questo è un software sperimentale fornito "così com'è", senza alcuna garanzia. L'autore non è responsabile per eventuali perdite di dati, crash di sistema o altri problemi derivanti dall'uso di questa applicazione. Usalo a tuo rischio e pericolo. Fai sempre un backup dei tuoi file audio prima di processarli.
+
+[EN] This is experimental software provided "as is", without warranty of any kind. The author is not responsible for any data loss, system crashes, or other issues resulting from the use of this application. Use at your own risk. Always backup your audio files before processing.
+
 License
 MIT License.
