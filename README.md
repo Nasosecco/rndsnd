@@ -17,7 +17,8 @@ Scarica l'app pronta all'uso per Linux (file `.tar.gz`) dalla sezione Releases. 
 
 👉 **[VAI AI DOWNLOAD / GO TO DOWNLOADS](https://github.com/Nasosecco/rndsnd/releases)**
 
----
+---<img width="1554" height="973" alt="Screenshot_20260120_173409" src="https://github.com/user-attachments/assets/2373372b-4f57-45da-9e96-5db4f5fdc1f1" />
+
 
 ## ✨ CARATTERISTICHE / FEATURES
 
