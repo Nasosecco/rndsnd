@@ -17,7 +17,6 @@ rndsnd is a Python-based audio explorer and generative synthesizer designed to b
 - Deep AI Auto-Tagging: Uses the PANNs (Cnn14) neural model to analyze and tag your audio files automatically. It employs a smart multi-sampling strategy (scanning start, middle, and end) to accurately classify evolving field recordings and long tracks.
 
 - Generative Mixer: Instantly create new audio assets using two distinct algorithms:
-
 **Linear Mode (1 Layer):** Generates seamless, DJ-style continuous mixes with smooth crossfades.
 
 **Chaos Mode (Multi-Layer):** Creates dense, experimental "walls of sound" by overlaying multiple tracks with random panning and volume.
