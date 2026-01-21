@@ -1,6 +1,7 @@
 # rndsnd - Audio Chaos Explorer & Generator
 
 **rndsnd** is a desktop application written in Python (PySide6) designed for sound designers, experimental musicians, and producers. It functions as an "intelligent" sample library manager and a random sound texture generator (Chaos Mixer).
+
 <img width="1392" height="768" alt="rndsnd_splash" src="https://github.com/user-attachments/assets/0997200c-f536-4aec-821b-45611e67d2d5" />
 
 The goal is to rediscover your forgotten sample library, catalog it automatically via AI, and transform it into new soundscapes or samples ready for your DAW.
@@ -18,6 +19,7 @@ The goal is to rediscover your forgotten sample library, catalog it automaticall
 * **Logging:** Every generated mix is accompanied by a `.txt` file containing the exact timecodes of the samples used.
 
 ---
+<img width="1600" height="972" alt="Screenshot_20260121_171001" src="https://github.com/user-attachments/assets/bb269987-f19c-47b8-8615-7ddee991f9c8" />
 
 ## How AI Analysis Works (Deep Scan)
 
