@@ -1,95 +1,139 @@
-# 🔊 rndsnd v0.6.5
-### AI-Powered Audio Manager & Generative Mixer
+# rndsnd - Audio Chaos Explorer & Generator
+<img width="2784" height="1536" alt="rndsnd_splash" src="https://github.com/user-attachments/assets/f3a59a16-8c3e-48dd-b1e5-ef0845b74887" />
 
-<img width="2784" height="1536" alt="rndsnd_splash" src="https://github.com/user-attachments/assets/ec988017-89df-4d74-9bc6-4453089f3711" />
+**rndsnd** is a desktop application written in Python (PySide6) designed for sound designers, experimental musicians, and producers. It functions as an "intelligent" sample library manager and a random sound texture generator (Chaos Mixer).
 
+The goal is to rediscover your forgotten sample library, catalog it automatically via AI, and transform it into new soundscapes or samples ready for your DAW.
 
->  Una workstation audio desktop che utilizza l'IA per catalogare automaticamente i campioni, generare mix creativi e velocizzare il workflow.
->
-> A desktop audio workstation that uses AI to auto-tag samples, generate creative mixes, and speed up the workflow.
+## ✨ Key Features
 
----
-
-## 📥 DOWNLOAD (App Pronta / Ready-to-use)
-
-**Non vuoi toccare il codice? / Don't want to code?**
-Scarica l'app pronta all'uso per Linux (file `.tar.gz`) dalla sezione Releases. Basta estrarre ed eseguire il file `rndsnd`.
-*Download the ready-to-use Linux app (.tar.gz) from Releases. Just extract and run the `rndsnd` executable.*
-
-👉 **[VAI AI DOWNLOAD / GO TO DOWNLOADS](https://github.com/Nasosecco/rndsnd/releases)**
-
----<img width="1554" height="973" alt="Screenshot_20260120_173409" src="https://github.com/user-attachments/assets/2373372b-4f57-45da-9e96-5db4f5fdc1f1" />
-
-
-## ✨ CARATTERISTICHE / FEATURES
-
-### Italiano
-* **Neural Tagging (PANNs):** Analisi automatica tramite IA (modello Cnn14) con 527 classi di riconoscimento (es. "Guitar", "Rain", "Kick"). *Funziona offline su CPU.*
-* **Generative Mixer:** Crea collage sonori casuali o filtrati per tag, esportando un log `.txt` dettagliato delle tracce usate.
-* **Editor Rapido:** Visualizzazione forma d'onda, zoom fluido e **Drag & Drop** per trascinare selezioni audio direttamente nella tua DAW.
-
-### English
-* **Neural Tagging (PANNs):** Automatic AI analysis (Cnn14 model) with 527 recognition classes. *Works offline on CPU.*
-* **Generative Mixer:** Create random or tag-filtered sound collages, exporting a detailed `.txt` log of the tracks used.
-* **Fast Editor:** Waveform visualization, smooth zoom, and **Drag & Drop** to export audio selections directly into your DAW.
+* **Integrated System Explorer:** Navigate internal and external hard drives directly from the app.
+* **Persistent Database:** Scan folders once; data is saved in a local SQLite database and remains available forever.
+* **AI Auto-Tagging (PANNs):** Automatic content recognition (e.g., "Piano", "Synthesizer", "Rain", "Drum") without cloud dependencies.
+* **Waveform Editor:** Waveform visualization with zoom, loop, and a **Drag & Drop** button to export selections directly to your favorite DAW.
+* **Generative Mixer:** An engine that takes random fragments from your library and layers them to create unique textures.
+* **Layered Logic:** The mixer doesn't just create a flat sequence; it overlays multiple audio tracks with random fades and panning for density and depth.
+* **Logging:** Every generated mix is accompanied by a `.txt` file containing the exact timecodes of the samples used.
 
 ---
 
-## ESECUZIONE DA SORGENTE / RUN FROM SOURCE
+## How AI Analysis Works (Deep Scan)
 
-Segui questi passi se vuoi avviare l'app dal codice Python senza compilarla.
-*Follow these steps to run the Python app directly.*
+The core of **rndsnd** is the neural analysis engine based on **Cnn14 (PANNs - Large-Scale Pretrained Audio Neural Networks)**.
 
-### 1. Prerequisiti / Prerequisites
-* **Python 3.9+**
-* **FFmpeg** (Necessario per leggere mp3/wav / Required for audio):
-  `sudo apt install ffmpeg`
+Unlike other software that only analyzes the first few seconds of a file, **rndsnd v0.7.6** uses a **Weighted Multi-Sampling** algorithm to ensure accuracy even on long or evolving files (such as field recordings or full tracks).
 
-### 2. Installazione / Installation
+### The Scanning Process:
+1.  **Preliminary Check:** The system checks the file duration.
+2.  **Sampling Strategy:**
+    * **Short Files (< 10s):** Analyzed entirely in a single pass.
+    * **Long Files (> 10s):** The algorithm extracts three "chunks" of 5 seconds each:
+        * *Start*
+        * *Middle*
+        * *End*
+3.  **Inference & Averaging:** The AI analyzes each chunk separately, calculating the probability of 527 possible audio tags.
+4.  **Aggregation:** Scores are summed. If a sound (e.g., a siren) is present only at the very end of the file, it will still be detected thanks to the final chunk scan.
+5.  **Tagging:** The 3 tags with the highest overall score are assigned to the file in the database.
 
-#### 1. Clona il repository / Clone repo
-  `git clone [https://github.com/Nasosecco/rndsnd.git](https://github.com/Nasosecco/rndsnd.git)`
-  `cd rndsnd`
+---
 
-#### 2. Crea ambiente virtuale / Create venv
-`python3 -m venv venv`
-`source venv/bin/activate`
+## 🛠️ Installation and Source Code
 
-#### 3. Installa dipendenze / Install dependencies
-`pip install PySide6 librosa matplotlib pydub soundfile panns-inference torch numpy`
+This application is written in **Python 3.10+**. Here is how to install and run it on your computer (Linux/macOS/Windows).
 
-#### 4. Avvio / Run
+### 1. System Prerequisites
+On Linux (Ubuntu/Debian), ensure you have the basic audio libraries installed:
+
+`sudo apt update
+sudo apt install python3-venv python3-pip libsndfile1 ffmpeg`
+
+(FFmpeg is required to handle formats like MP3 and for export operations).
+
+### 2. Clone or Download
+Download the source files into a folder, for example, rndsnd_studio.
+
+### 3. Create a Virtual Environment (Recommended)
+To avoid interfering with your main Python system, use a virtual environment:
+
+`cd rndsnd_studio
+python3 -m venv venv
+source venv/bin/activate`
+
+### 4. Install Dependencies
+Create a file named requirements.txt (see below) or install libraries manually:
+
+`pip install PySide6 librosa pydub soundfile matplotlib panns-inference torch numpy`
+
+### 5. Run the Application
+With the virtual environment active:
+
 `python app_desktop.py`
 
-## 🛠️ COME COMPILARE / BUILD GUIDE
-Segui questi passaggi se vuoi creare il pacchetto distribuibile (.tar.gz) usando lo script incluso. Follow these steps to create the standalone distribution package (.tar.gz) using the included script.
+## User Guide
 
-### 1. Installa PyInstaller
+### Tab 1: Library & Editor
+Navigation: Use the tree on the left ("System Browser") to explore your folders and drives.
 
-##### Assicurati di essere nel venv / Ensure venv is active
-`pip install pyinstaller`
+Scanning: If a folder has never been analyzed, the table on the right will be empty.
 
-### 2. Esegui lo Script di Build / Run Build Script
-Abbiamo incluso uno script (build_rndsnd.sh) che pulisce, compila, crea il README e comprime tutto automaticamente. We included a script that automates cleanup, compilation, README generation, and compression.
+Right-click on the folder in the tree -> "✨ Scan with AI".
 
-##### Rendi lo script eseguibile / Make executable
-`chmod +x build_rndsnd.sh`
+Wait for completion.
 
-##### Lancia la build / Run build
-`./build_rndsnd.sh`
+Preview: Click on a file in the table to view the waveform.
 
-### 3. Risultato / Output
-Troverai il file rndsnd_v0.6.5_linux_x64.tar.gz nella cartella principale del progetto. You will find the ready-to-ship package in the main project folder.
+Drag & Drop: Select a part of the waveform (orange area). Click and drag the "📦 DRAG" button directly into your DAW or onto your desktop to export that snippet.
 
-## NOTE IMPORTANTI / IMPORTANT NOTES
-[IT] Primo Avvio IA Il modello neurale (Cnn14) non è incluso nel codice sorgente. La prima volta che userai la funzione "Analizza Libreria", l'app scaricherà automaticamente 312MB. È necessaria una connessione internet.
+### Tab 2: Generative Mixer
+#### Mode:
 
-[EN] First AI Run The neural model (Cnn14) is not included in the source code. The first time you use "Analyze Library", the app will automatically download 312MB. Internet connection required.
+Filtered List: Uses only files matching your current search in the Library tab.
 
-## ⚠️ DISCLAIMER
-[IT] Questo è un software sperimentale fornito "così com'è", senza alcuna garanzia. L'autore non è responsabile per eventuali perdite di dati, crash di sistema o altri problemi derivanti dall'uso di questa applicazione. Usalo a tuo rischio e pericolo. Fai sempre un backup dei tuoi file audio prima di processarli.
+Full Chaos: Picks randomly from the entire database (even files currently hidden).
 
-[EN] This is experimental software provided "as is", without warranty of any kind. The author is not responsible for any data loss, system crashes, or other issues resulting from the use of this application. Use at your own risk. Always backup your audio files before processing.
+#### Parameters:
 
-## License
-MIT License.
+Duration: The total length of the final mix.
+
+Layers: How many tracks to overlay simultaneously (higher = denser/more chaotic).
+
+Generate: Click the button. The file will be saved in the output/ folder along with a log .txt file.
+
+### 📦 Project Structure
+app_desktop.py: Main source code (GUI + Logic).
+
+audio.db: SQLite database (generated automatically on first launch).
+
+rndsnd_splash.png: Splash screen image (optional).
+
+rndsnd_icon.png: App icon (optional).
+
+output/: Folder where generated mixes are saved.
+
+### License
+MIT License - Feel free to modify, hack, and break this code to create new sounds.
+
+
+***
+
+### Extra Tip
+Create a file named **`requirements.txt`** in the same folder as your script with the following content, so users can install everything easily:
+
+`PySide6
+librosa
+pydub
+soundfile
+matplotlib
+panns-inference
+torch
+numpy`
+
+### ⚠️ Disclaimer
+
+**rndsnd** is currently in active development (Beta). While every effort has been made to ensure the safety and stability of this software, it is provided **"as is"**, without warranty of any kind, express or implied.
+
+**Data Safety:** This software scans and reads files from your hard drive. Although it operates in a read-only mode regarding your source files, the developer is not liable for any data loss or corruption that may occur. Always maintain backups of your important audio libraries.
+
+**Copyright:** You are solely responsible for the audio files you scan and process. Ensure you have the legal right to use any samples or music tracks loaded into the software. The generated mixes are derivative works; their copyright status depends on the original material you provide.
+
+**AI Accuracy:** The AI auto-tagging feature uses a pre-trained neural network (PANNs). Results are probabilistic and may not always be 100% accurate.
