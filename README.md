@@ -5,6 +5,8 @@
 
 The goal is to rediscover your forgotten sample library, catalog it automatically via AI, and transform it into new soundscapes or samples ready for your DAW.
 
+#### Don't want to build from source? You can download the latest pre-compiled version from the Releases page.
+
 ## ✨ Key Features
 
 * **Integrated System Explorer:** Navigate internal and external hard drives directly from the app.
