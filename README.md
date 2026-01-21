@@ -8,6 +8,28 @@ The goal is to rediscover your forgotten sample library, catalog it automaticall
 
 #### Don't want to build from source? You can download the latest pre-compiled version from the Releases page.
 
+## What can rndsnd do?
+
+rndsnd is a Python-based audio explorer and generative synthesizer designed to breathe new life into your local sound library. It combines neural network analysis with creative mixing tools.
+
+### Key Capabilities:
+
+- Deep AI Auto-Tagging: Uses the PANNs (Cnn14) neural model to analyze and tag your audio files automatically. It employs a smart multi-sampling strategy (scanning start, middle, and end) to accurately classify evolving field recordings and long tracks.
+
+- Generative Mixer: Instantly create new audio assets using two distinct algorithms:
+
+**Linear Mode (1 Layer):** Generates seamless, DJ-style continuous mixes with smooth crossfades.
+
+**Chaos Mode (Multi-Layer):** Creates dense, experimental "walls of sound" by overlaying multiple tracks with random panning and volume.
+
+**Visual Waveform Editor:** Preview files with a responsive waveform view, select loops, and inspect audio details.
+
+**📦 Direct DAW Integration:** Features a dedicated Drag & Drop button to export selected audio snippets directly into Ableton, Reaper, Logic, or your desktop.
+
+**Smart Logging:** Every generated mix is accompanied by a text log detailing exactly which files were used and their specific timecodes.
+
+**🔒 Local & Persistent:** Builds a local SQLite database of your sounds for instant searching, working entirely offline without cloud dependencies.
+
 ## ✨ Key Features
 
 * **Integrated System Explorer:** Navigate internal and external hard drives directly from the app.
