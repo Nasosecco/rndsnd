@@ -1,7 +1,7 @@
 # rndsnd - Audio Chaos Explorer & Generator
-<img width="2784" height="1536" alt="rndsnd_splash" src="https://github.com/user-attachments/assets/f3a59a16-8c3e-48dd-b1e5-ef0845b74887" />
 
 **rndsnd** is a desktop application written in Python (PySide6) designed for sound designers, experimental musicians, and producers. It functions as an "intelligent" sample library manager and a random sound texture generator (Chaos Mixer).
+<img width="1392" height="768" alt="rndsnd_splash" src="https://github.com/user-attachments/assets/0997200c-f536-4aec-821b-45611e67d2d5" />
 
 The goal is to rediscover your forgotten sample library, catalog it automatically via AI, and transform it into new soundscapes or samples ready for your DAW.
 
@@ -34,6 +34,25 @@ Unlike other software that only analyzes the first few seconds of a file, **rnds
 3.  **Inference & Averaging:** The AI analyzes each chunk separately, calculating the probability of 527 possible audio tags.
 4.  **Aggregation:** Scores are summed. If a sound (e.g., a siren) is present only at the very end of the file, it will still be detected thanks to the final chunk scan.
 5.  **Tagging:** The 3 tags with the highest overall score are assigned to the file in the database.
+
+### Mixer Logic: Linear vs. Chaos
+The Generative Mixer changes its algorithm based on the "Layers / Tracks" setting:
+
+#### 1 Layer (DJ Mode / Linear):
+
+Creates a seamless, linear mix similar to a radio or DJ set.
+
+Tracks are placed one after another with a smooth crossfade (no silence gaps).
+
+Ideal for creating long, evolving soundscapes or continuous listening experiences.
+
+#### 2+ Layers (Chaos Mode / Wall of Sound):
+
+Creates a dense, textured "wall of sound."
+
+Multiple audio clips play simultaneously, overlapping with random start times, panning, and volume levels.
+
+Ideal for experimental textures, drone music, or complex background noise.
 
 ---
 
