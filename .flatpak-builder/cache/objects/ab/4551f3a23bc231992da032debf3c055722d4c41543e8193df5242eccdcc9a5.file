@@ -1,0 +1,4 @@
+[Application]
+name=com.pirxa.AudioCurator
+runtime=org.kde.Platform/x86_64/6.6
+sdk=org.kde.Sdk/x86_64/6.6
