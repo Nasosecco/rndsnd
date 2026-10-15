@@ -8,10 +8,10 @@ ICON="rndsnd_icon.png"
 SPLASH="rndsnd_splash.png"
 ZIP_NAME="${APP_NAME}_v${VERSION}_linux_x64.tar.gz"
 
-echo "🚀 Inizio processo di pacchettizzazione per $APP_NAME v$VERSION..."
+echo "Inizio processo di pacchettizzazione per $APP_NAME v$VERSION..."
 
 # 1. Pulizia cartelle precedenti
-echo "🧹 Pulizia vecchie build e archivi..."
+echo "Pulizia vecchie build e archivi..."
 rm -rf build dist "$ZIP_NAME"
 
 # 2. Controllo dipendenze build
@@ -22,7 +22,7 @@ then
 fi
 
 # 3. Lancio PyInstaller
-echo "📦 Generazione pacchetto (One-Directory)..."
+echo "Generazione pacchetto (One-Directory)..."
 pyinstaller --noconfirm --onedir --windowed \
     --name "$APP_NAME" \
     --add-data "$SPLASH:." \
@@ -38,7 +38,7 @@ pyinstaller --noconfirm --onedir --windowed \
 
 # 4. Creazione file README (Bilingue)
 if [ -d "dist/$APP_NAME" ]; then
-    echo "📝 Generazione file README.txt..."
+    echo "Generazione file README.txt..."
     cat << EOF > "dist/$APP_NAME/README.txt"
 =======================================================
           $APP_NAME v$VERSION - Audio Intelligence
@@ -82,16 +82,16 @@ MAIN FEATURES:
 EOF
 
     # 5. Creazione dell'archivio per la distribuzione
-    echo "🎁 Creazione archivio compresso: $ZIP_NAME..."
+    echo "Creazione archivio compresso: $ZIP_NAME..."
     cd dist
     tar -czf "../$ZIP_NAME" "$APP_NAME"
     cd ..
 
     echo "---------------------------------------------------"
-    echo "✅ PROCESSO COMPLETATO CON SUCCESSO!"
-    echo "📦 Archivio pronto: $ZIP_NAME"
+    echo "PROCESSO COMPLETATO CON SUCCESSO!"
+    echo "Archivio pronto: $ZIP_NAME"
     echo "---------------------------------------------------"
 else
-    echo "❌ Errore: La build è fallita."
+    echo "Errore: La build è fallita."
     exit 1
 fi
