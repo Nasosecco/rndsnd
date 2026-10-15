@@ -1,0 +1,42 @@
+name: Build rndsnd
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # Permette di avviare la compilazione anche manualmente dal sito
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # Specifica i tre sistemi operativi su cui GitHub avvierà le macchine virtuali
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+    - name: Scarica il codice del repository
+      uses: actions/checkout@v4
+
+    - name: Configura Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Installa le dipendenze
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller pyside6 librosa soundfile pydub numpy matplotlib
+        
+        # Installa PyTorch in versione SOLO CPU (Salva ~2 Gigabyte di spazio!)
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install panns-inference
+
+    - name: Avvia la compilazione
+      run: python build_rndsnd.py
+
+    - name: Salva il pacchetto eseguibile
+      uses: actions/upload-artifact@v4
+      with:
+        name: rndsnd-v0.9.0-${{ matrix.os }}
+        path: dist/
