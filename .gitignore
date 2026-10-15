@@ -4,3 +4,9 @@ build/
 dist/
 *.db
 *.tar.gz
+exports/
+output/
+build/
+dist/
+venv/
+__pycache__/
