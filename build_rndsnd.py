@@ -48,7 +48,7 @@ for src, dest in datas:
 PyInstaller.__main__.run(args)
 
 # --- 3. PACCHETTIZZAZIONE (.TAR.GZ) ---
-print("📦 Creazione archivio tar.gz...")
+print("Creazione archivio tar.gz...")
 
 # Percorso completo dell'eseguibile appena creato
 exe_path = os.path.join(OUTPUT_DIR, APP_NAME)
@@ -68,14 +68,14 @@ if os.path.exists(exe_path):
             print("   + Aggiungo: README.txt")
             tar.add("README.txt", arcname="README.txt")
         else:
-            print("   ⚠️ ATTENZIONE: README.txt non trovato!")
+            print("  ATTENZIONE: README.txt non trovato!")
             
         # Aggiungi la Licenza (se esiste)
         if os.path.exists("LICENSE"):
             print("   + Aggiungo: LICENSE")
             tar.add("LICENSE", arcname="LICENSE")
             
-    print(f"\n✅ SUCCESSO! Archivio pronto: {tar_path}")
+    print(f"\n SUCCESSO! Archivio pronto: {tar_path}")
     print("   Ora puoi caricare questo file sulle Release di GitHub.")
 else:
-    print("\n❌ ERRORE: L'eseguibile non è stato creato correttamente.")
+    print("\n ERRORE: L'eseguibile non è stato creato correttamente.")
