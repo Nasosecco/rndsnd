@@ -1,38 +1,42 @@
 # rndsnd
 **Audio Chaos Explorer & Generative Multitrack Studio**
 
-`rndsnd` is an experimental audio tool designed for sound designers, musicians, and audio chaos enthusiasts. It allows you to build a database from your local audio files, automatically analyze them using AI, and generate unpredictable, layered audio mixes or manually arrange them in a non-destructive multitrack environment.
 ![Splash Screen](rndsnd_splash.png)
-## What it can do
 
-* **Library Editor & AI Scanner:** Point the app to your audio folders. It will scan and extract duration, size, and optionally use AI to automatically tag your sounds and analyze their BPM and musical key.
-* **Clip Bin:** Select interesting portions of an audio waveform and save them as clips. You can instantly drag and drop these clips directly into your favorite DAW (like Audacity, Ableton, or Reaper).
-* **Generative Mixer:** Create offline, chaotic layered mixes. Set the duration, the number of layers, the "grain" size of the clips, and let the engine build a random soundscape from your filtered library.
-* **Live Mix:** A real-time generative playback engine. It randomly pulls clips from your library based on your filters (including BPM and compatible Camelot keys), applies random panning/volume, and plays them live. You can solo/mute layers, quantize changes to a beat grid, and record the output.
-* **Multitrack Editor:** A non-destructive timeline where you can drag and drop clips, trim them, add fades, adjust pan/volume, and export the final mix.
+Un potente software per esplorare, gestire e remixare la tua libreria audio in modi nuovi e generativi. I dati, i file temporanei e i mix esportati vengono salvati comodamente nella tua cartella locale `~/rndsnd`[cite: 9].
 
-## ⚙️ How it works
+## 🚀 Cosa può fare
 
-1. **Scan your files:** Use the *System Browser* on the left to locate your audio folders. Right-click a folder to scan it. `rndsnd` will build a lightweight local database (`audio.db`).
-2. **Filter & Select:** Use the search bar to filter sounds by name or tags.
-3. **Generate & Play:** Switch to the *Mixer* or *Live Mix* tabs to let the software generate random compositions, or use the *Multitrack* tab to manually build your arrangement.
-4. **Export:** All your generated mixes are saved in the `~/rndsnd/output` folder on your computer, along with a `.txt` log file detailing exactly which audio slices were used.
+* **Library Editor & AI Scanner:** Punta l'app verso le tue cartelle audio. Eseguirà una scansione per estrarre durata e dimensioni, utilizzando un modello di Intelligenza Artificiale integrato (PyTorch / PANNs) per taggare automaticamente i tuoi suoni e analizzare BPM e tonalità musicale[cite: 9].
+* **Clip Bin & Integrazione DAW:** Isola solo le parti che ti interessano! Puoi selezionare porzioni specifiche di una forma d'onda audio e salvarle come clip nel "Clip Bin". Da lì, **puoi trascinare (drag and drop) queste clip direttamente su una traccia di Audacity** (o altre DAW come Ableton e Reaper) per accelerare drasticamente il tuo flusso di lavoro e la costruzione dei tuoi beat[cite: 9].
+* **Generative Mixer:** Crea mix caotici e stratificati offline. Imposta la durata, il numero di tracce sovrapposte, la "grana" delle clip (da micro a extra-long) e lascia che il motore costruisca un paesaggio sonoro casuale partendo dalla tua libreria filtrata[cite: 9].
+* **Live Mix:** Un motore di riproduzione generativa in tempo reale. Pesca casualmente clip dalla libreria in base ai tuoi filtri (inclusi BPM e chiavi Camelot compatibili), applica panning/volume casuali e le suona dal vivo. Puoi silenziare o isolare i livelli, rimescolare i singoli layer e quantizzare i cambi su una griglia ritmica (a tempo di beat o di battuta) per transizioni perfette[cite: 9].
+* **Multitrack Editor:** Una timeline non distruttiva dove puoi posizionare le tue clip, tagliarle (trim), aggiungere dissolvenze in entrata e in uscita, regolare pan e volume di ogni traccia ed esportare il mix finale[cite: 9].
 
-*(Supported formats include WAV, MP3, FLAC, OGG, and more).*
+## 💻 Installazione
+
+Il programma è stato progettato per essere "Plug & Play". Tutti i componenti complessi, inclusi i modelli di Intelligenza Artificiale da ~330 MB necessari allo scanner, vengono gestiti e scaricati comodamente dall'interno dell'app[cite: 9].
+
+### Windows
+1. Vai alla scheda **Releases** sulla destra della pagina GitHub.
+2. Scarica il file `.exe` o il pacchetto `.zip` per Windows.
+3. Se hai scaricato lo zip, estrailo. Fai doppio clic sul file eseguibile per lanciare il programma. Non è richiesta alcuna installazione!
+
+### macOS
+1. Vai alla scheda **Releases** su GitHub.
+2. Scarica il pacchetto destinato a macOS ed estrailo.
+3. Fai doppio clic sull'applicazione. *(Nota: al primo avvio potrebbe essere necessario fare clic destro sull'app e selezionare "Apri" per autorizzare l'apertura dalle impostazioni di sicurezza del Mac).*
+
+### Linux
+1. Vai alla scheda **Releases** e scarica l'eseguibile compilato per Linux.
+2. Rendi il file eseguibile. Dal terminale digita: `chmod +x rndsnd_linux` (o il nome esatto del file).
+3. Avvialo con `./rndsnd_linux` o facendoci doppio clic.
 
 ---
 
-## Important Instructions for macOS Users
+*In alternativa (per Sviluppatori):* puoi avviare l'app direttamente dal codice sorgente Python. Ti basterà installare le dipendenze di base (PySide6, librosa, soundfile, matplotlib) ed eseguire `python app_desktop.py`[cite: 9]. Per sbloccare lo scanner intelligente, assicurati di installare anche `torch` e `panns-inference` tramite pip[cite: 9].
 
-Since `rndsnd` is an open-source tool and is not signed with a paid Apple Developer Certificate, macOS's Gatekeeper security system will initially block the app, showing an error saying **"The app is damaged and can't be opened"** or that it is from an unidentified developer.
+## 📸 Screenshots
 
-**This is normal.** To fix this and run the app safely, follow these quick steps:
-
-1. Move the downloaded `rndsnd.app` file to your **Applications** folder (or any folder of your choice).
-2. Open the **Terminal** app on your Mac (you can find it using Spotlight search).
-3. Type the following command and make sure to leave a space at the end:
-   `xattr -cr `
-4. Drag and drop the `rndsnd.app` icon directly into the Terminal window (this will automatically paste the correct path).
-5. Press **Enter**. 
-
-You can now double-click the app to open it normally without any security warnings!
+![Il Generative Mixer](assets/mixer.png)
+![Il Multitrack Editor](assets/multitrack.png)
