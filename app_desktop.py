@@ -13,6 +13,10 @@ import warnings
 import shutil
 import json
 import copy
+import importlib.util
+import urllib.request
+import urllib.error
+import http.client
 
 import numpy as np
 import librosa
@@ -28,16 +32,14 @@ except Exception:  # es. Python 3.13 senza audioop
 
 # --- CONFIGURATION ---
 warnings.filterwarnings("ignore")
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.11.0"
 
-# --- LOAD NEURAL ENGINE ---
-AI_AVAILABLE = False
-try:
-    import torch  # noqa: F401
-    from panns_inference import AudioTagging
-    AI_AVAILABLE = True
-except Exception:
-    pass
+# --- MOTORE IA (PANNs) ---
+# PyTorch NON viene importato all'avvio (e' lento e pesante): qui si controlla solo se e' installato.
+# Il vero import avviene nel thread di scansione, quando serve (vedi load_ai_model).
+def _module_available(name):
+    try: return importlib.util.find_spec(name) is not None
+    except Exception: return False
 
 # Fix ALSA errors on Linux
 def alsa_error_handler(filename, line, function, err, fmt): pass
@@ -333,29 +335,144 @@ def get_duration(path):
     try: return float(librosa.get_duration(path=path))
     except TypeError: return float(librosa.get_duration(filename=path))
 
+# =====================================================================
+#  IA: stato, download del modello (senza wget), caricamento, etichettatura
+# =====================================================================
+PANNS_DIR = os.path.join(os.path.expanduser("~"), "panns_data")           # stessa cartella che usa la libreria
+PANNS_CKPT = os.path.join(PANNS_DIR, "Cnn14_mAP=0.431.pth")
+PANNS_LABELS = os.path.join(PANNS_DIR, "class_labels_indices.csv")
+PANNS_CKPT_URL = "https://zenodo.org/record/3987831/files/Cnn14_mAP%3D0.431.pth?download=1"
+PANNS_LABELS_URL = "http://storage.googleapis.com/us_audioset/youtube_corpus/v1/csv/class_labels_indices.csv"
+PANNS_CKPT_MIN = 3e8        # stessa soglia della libreria: sotto, il file e' considerato incompleto
+UNTAGGED = ("No AI", "Scan Error", "Unknown")   # tag che "Rianalizza con IA" sostituisce (i tag scritti a mano restano)
+
+def ai_status():
+    """'missing_libs' (PyTorch/panns_inference non installati) | 'need_model' (file da scaricare) | 'ready'."""
+    if not (_module_available('torch') and _module_available('panns_inference')): return 'missing_libs'
+    ok = (os.path.isfile(PANNS_LABELS) and os.path.getsize(PANNS_LABELS) > 0 and
+          os.path.isfile(PANNS_CKPT) and os.path.getsize(PANNS_CKPT) >= PANNS_CKPT_MIN)
+    return 'ready' if ok else 'need_model'
+
+def download_file(url, dest, progress=None, check=None, min_bytes=0, timeout=30, chunk=1 << 18):
+    """Scarica in dest con ripresa: i dati arrivano in dest.part e, se il download si interrompe,
+    il tentativo successivo riparte da dove era arrivato (se il server supporta Range)."""
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    part = dest + ".part"
+    have = os.path.getsize(part) if os.path.exists(part) else 0
+    headers = {'User-Agent': 'rndsnd'}
+    if have: headers['Range'] = f'bytes={have}-'
+    resp = None
+    try:
+        resp = urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout)
+    except urllib.error.HTTPError as e:
+        if not (e.code == 416 and have):      # 416 + .part esistente: il file era gia' completo
+            raise RuntimeError(f"server answered HTTP {e.code}") from None
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"network error: {e.reason}") from None
+    except OSError as e:
+        raise RuntimeError(f"network error: {e}") from None
+    total = 0
+    if resp is not None:
+        with resp:
+            clen = int(resp.headers.get('Content-Length') or 0)
+            if have and getattr(resp, 'status', 200) == 206: mode = 'ab'; total = have + clen if clen else 0
+            else: mode = 'wb'; have = 0; total = clen       # il server ignora Range: si riparte da zero
+            done = have
+            try:
+                with open(part, mode) as f:
+                    while True:
+                        if check: check()
+                        buf = resp.read(chunk)
+                        if not buf: break
+                        f.write(buf); done += len(buf)
+                        if progress: progress(done, total)
+            except (http.client.IncompleteRead, OSError) as e:
+                raise RuntimeError(f"connection interrupted ({e.__class__.__name__}); press the button again to resume") from None
+    size = os.path.getsize(part)
+    if total and size != total:
+        raise RuntimeError(f"incomplete download ({size / 1e6:.0f} of {total / 1e6:.0f} MB); press the button again to resume")
+    if size < min_bytes:
+        os.remove(part)
+        raise RuntimeError("the downloaded file is too small (probably an error page); try again later")
+    os.replace(part, dest)
+
+def load_ai_model():
+    """Importa PyTorch e panns_inference SOLO ora. I file sono gia' scaricati da noi, quindi la libreria
+    non chiama wget. Usa la GPU se PyTorch ne trova una, altrimenti la CPU. Ritorna (modello, device)."""
+    import torch
+    from panns_inference import AudioTagging
+    try:
+        model = AudioTagging(checkpoint_path=PANNS_CKPT, device='cuda')
+    except Exception as e:
+        # PyTorch >= 2.6 carica i checkpoint in modalita' "weights_only": se il file ufficiale lo rifiuta, si ritenta
+        if 'weights_only' not in str(e) and 'npickl' not in str(e): raise
+        orig = torch.load
+        torch.load = lambda *a, **k: orig(*a, **{**k, 'weights_only': False})
+        try: model = AudioTagging(checkpoint_path=PANNS_CKPT, device='cuda')
+        finally: torch.load = orig
+    return model, str(getattr(model, 'device', 'cpu'))
+
+def tag_audio(model, path, duration):
+    """Le 3 categorie piu' probabili su fino a 3 frammenti da 5 s (inizio, meta', fine)."""
+    chunk_dur = 5.0
+    if duration < 10: offsets = [0]
+    else: offsets = [max(0, o) for o in (0, duration / 2 - chunk_dur / 2, duration - chunk_dur)]
+    acc = None
+    for off in offsets:
+        y, _ = librosa.load(path, sr=32000, mono=True, offset=off, duration=chunk_dur)
+        if len(y) < 32000: y = np.pad(y, (0, 32000 - len(y)), mode='constant')
+        clipwise, _ = model.inference(y[None, :])
+        acc = clipwise[0].copy() if acc is None else acc + clipwise[0]
+    top = np.argsort(acc)[::-1][:3]
+    return ", ".join(model.labels[int(k)] for k in top)
+
 class ScanWorker(QThread):
     progress = Signal(int)
     log = Signal(str)
     scan_done = Signal(int)   # FIX: prima ridefiniva QThread.finished
 
-    def __init__(self, folder):
+    def __init__(self, folder, use_ai=True, retag=False):
         super().__init__()
         self.folder = folder
+        self.use_ai = use_ai          # False: scansione senza IA (tag "No AI")
+        self.retag = retag            # True: rianalizza solo i file con tag "No AI" / "Scan Error" / "Unknown"
         self.ai_model = None
+        self.ai_error = None          # motivo per cui l'IA non e' stata usata (mostrato all'utente)
+        self._ai_tried = False
 
     def run(self):
-        new_files = 0
+        count = 0
         conn = None
         try:
             conn = sqlite3.connect(DB_PATH)
-            new_files = self._scan(conn)
+            count = self._retag(conn) if self.retag else self._scan(conn)
         except Exception:
             traceback.print_exc()
         finally:
             if conn is not None:
                 try: conn.commit(); conn.close()
                 except Exception: pass
-            self.scan_done.emit(new_files)   # sempre emesso (prima poteva restare "Scanning..." per sempre)
+            self.scan_done.emit(count)   # sempre emesso (prima poteva restare "Scanning..." per sempre)
+
+    def _ensure_model(self):
+        """Carica il modello UNA volta sola. Ritorna True se e' disponibile."""
+        if self.ai_model is not None: return True
+        if self._ai_tried or not self.use_ai: return False
+        self._ai_tried = True
+        st = ai_status()
+        if st != 'ready':
+            self.ai_error = ("PyTorch / panns-inference not installed" if st == 'missing_libs'
+                             else "AI model files not downloaded")
+            return False
+        self.log.emit("🧠 Loading AI model...")
+        try:
+            self.ai_model, dev = load_ai_model()
+            self.log.emit(f"🧠 AI model ready ({'GPU' if 'cuda' in dev else 'CPU'})")
+            return True
+        except Exception as e:
+            traceback.print_exc()
+            self.ai_error = f"model could not be loaded: {str(e)[:120]}"
+            return False
 
     def _scan(self, conn):
         cur = conn.cursor()
@@ -376,7 +493,6 @@ class ScanWorker(QThread):
         if total == 0: return 0
 
         new_files = 0
-        ai_tried = False
         for i, path in enumerate(file_list):
             if self.isInterruptionRequested(): break
             filename = os.path.basename(path)
@@ -385,31 +501,12 @@ class ScanWorker(QThread):
                 if i % 10 == 0: self.progress.emit(int((i / total) * 100))
                 continue
 
-            # FIX: il modello si prova a caricare UNA volta sola (prima si ritentava ad ogni file)
-            if AI_AVAILABLE and not ai_tried:
-                ai_tried = True
-                self.log.emit("🧠 Loading AI Model...")
-                try: self.ai_model = AudioTagging(checkpoint_path=None, device='cpu')
-                except Exception: self.ai_model = None
-
+            have_ai = self._ensure_model()
             tags = "Unknown"; duration = 0.0; size = 0   # FIX: 'size' ora è sempre definita
             try:
                 size = os.path.getsize(path)
                 duration = get_duration(path)
-                if self.ai_model:
-                    chunk_dur = 5.0
-                    if duration < 10: offsets = [0]
-                    else: offsets = [max(0, o) for o in (0, duration / 2 - chunk_dur / 2, duration - chunk_dur)]
-                    acc = None
-                    for off in offsets:
-                        y, _ = librosa.load(path, sr=32000, mono=True, offset=off, duration=chunk_dur)
-                        if len(y) < 32000: y = np.pad(y, (0, 32000 - len(y)), mode='constant')
-                        clipwise, _ = self.ai_model.inference(y[None, :])
-                        acc = clipwise[0].copy() if acc is None else acc + clipwise[0]
-                    top = np.argsort(acc)[::-1][:3]
-                    tags = ", ".join(self.ai_model.labels[int(k)] for k in top)
-                else:
-                    tags = "No AI"
+                tags = tag_audio(self.ai_model, path, duration) if have_ai else "No AI"
             except Exception as e:
                 print(f"Error analyzing {filename}: {e}")
                 tags = "Scan Error"
@@ -420,6 +517,30 @@ class ScanWorker(QThread):
             self.progress.emit(int(((i + 1) / total) * 100))
             self.log.emit(f"Analyzed: {filename[:15]}... [{tags}]")
         return new_files
+
+    def _retag(self, conn):
+        """Rianalizza con l'IA i file gia' nel database marcati "No AI" / "Scan Error" / "Unknown".
+        I tag scritti a mano non vengono toccati."""
+        cur = conn.cursor()
+        prefix = folder_prefix(self.folder)
+        cur.execute(f"SELECT id, path, duration FROM files WHERE substr(path, 1, ?) = ? AND tags IN ({','.join('?' * len(UNTAGGED))})",
+                    (len(prefix), prefix) + UNTAGGED)
+        rows = [r for r in cur.fetchall() if os.path.exists(r[1])]
+        if not rows: return 0
+        if not self._ensure_model(): return 0          # senza modello non si sovrascrive nulla
+        done = 0
+        for i, (fid, path, dur) in enumerate(rows):
+            if self.isInterruptionRequested(): break
+            try:
+                tags = tag_audio(self.ai_model, path, dur or get_duration(path))
+            except Exception as e:
+                print(f"Error analyzing {os.path.basename(path)}: {e}"); continue
+            cur.execute("UPDATE files SET tags = ? WHERE id = ?", (tags, fid))
+            done += 1
+            if done % 20 == 0: conn.commit()
+            self.progress.emit(int((i + 1) / len(rows) * 100))
+            self.log.emit(f"🧠 {os.path.basename(path)[:18]}... [{tags}]")
+        return done
 
 
 # =====================================================================
@@ -1409,7 +1530,9 @@ class RndSndApp(QMainWindow):
         self.setup_multitrack_tab()
 
         QShortcut(QKeySequence("Ctrl+B"), self, activated=self.add_clip_from_selection)
+        self.ai_task = None
         self.switch_theme("Dark")
+        self.refresh_ai_status()
 
     def init_db(self):
         conn = sqlite3.connect(DB_PATH)
@@ -1436,6 +1559,9 @@ class RndSndApp(QMainWindow):
         self.title_label = QLabel(f"<h2>rndsnd v{APP_VERSION}</h2>")
         header.addWidget(self.title_label)
         header.addStretch()
+        self.ai_lbl = QLabel(""); header.addWidget(self.ai_lbl)
+        self.ai_btn = QPushButton(""); self.ai_btn.clicked.connect(self.on_ai_button); header.addWidget(self.ai_btn)
+        header.addSpacing(20)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["Dark", "Light"])
         self.theme_combo.currentTextChanged.connect(self.switch_theme)
@@ -1502,6 +1628,7 @@ class RndSndApp(QMainWindow):
         right_layout = QVBoxLayout(right_frame)
 
         self.scan_info_lbl = QLabel("Select a folder to view files.")
+        self.scan_info_lbl.setWordWrap(True)      # i messaggi lunghi (es. errori dell'IA) devono restare leggibili
         self.scan_progress = QProgressBar()
         self.scan_progress.setVisible(False)
         right_layout.addWidget(self.scan_info_lbl)
@@ -1623,19 +1750,112 @@ class RndSndApp(QMainWindow):
             scan_action = QAction(f"✨ Scan '{name}' with AI", self)
             scan_action.triggered.connect(lambda: self.start_scan(path))
             menu.addAction(scan_action)
+            retag_action = QAction(f"🧠 Re-run AI on untagged files in '{name}'", self)
+            retag_action.triggered.connect(lambda: self.start_scan(path, mode="retag"))
+            menu.addAction(retag_action)
             bpm_action = QAction(f"🎼 Analyze BPM / Key in '{name}'", self)
             bpm_action.triggered.connect(lambda: self.start_scan(path, mode="bpm"))
             menu.addAction(bpm_action)
             menu.exec(self.tree.viewport().mapToGlobal(position))
 
+    # --- stato e download dell'IA ---
+    def refresh_ai_status(self):
+        st = ai_status(); self.ai_state = st
+        downloading = self.ai_task is not None
+        if downloading:
+            self.ai_lbl.setText("🧠 AI: downloading model..."); self.ai_btn.setText("✖ Cancel download"); self.ai_btn.setVisible(True)
+        elif st == 'ready':
+            self.ai_lbl.setText("🧠 AI: ready"); self.ai_btn.setVisible(False)
+        elif st == 'need_model':
+            self.ai_lbl.setText("🧠 AI: model not downloaded"); self.ai_btn.setText("⬇ Download AI model (~330 MB)"); self.ai_btn.setVisible(True)
+        else:
+            self.ai_lbl.setText("🧠 AI: not installed"); self.ai_btn.setText("How to enable the AI"); self.ai_btn.setVisible(True)
+        # senza questo, con la finestra stretta etichetta e pulsante si schiacciano e il testo viene tagliato
+        self.ai_lbl.setMinimumWidth(self.ai_lbl.fontMetrics().horizontalAdvance(self.ai_lbl.text()) + 24)
+        self.ai_btn.setMinimumWidth(self.ai_btn.fontMetrics().horizontalAdvance(self.ai_btn.text()) + 40)
+
+    AI_INSTALL_HELP = ("The AI tagging needs PyTorch and panns-inference, which are not installed in this Python.\n\n"
+                       "In a terminal:\n    pip install torch panns-inference\n\n"
+                       "(For a smaller CPU-only PyTorch:  pip install torch --index-url https://download.pytorch.org/whl/cpu )\n\n"
+                       "Then restart rndsnd. The ~330 MB model is downloaded from inside the program with the button in the top bar. "
+                       "Until then, files are scanned without AI and tagged \"No AI\".")
+
+    def on_ai_button(self):
+        if self.ai_task is not None:
+            self.ai_task.cancel(); self.scan_info_lbl.setText("⏹ Cancelling download (the partial file is kept)..."); return
+        if self.ai_state == 'need_model': self.ai_download()
+        elif self.ai_state == 'missing_libs': QMessageBox.information(self, "Enable the AI", self.AI_INSTALL_HELP)
+
+    def ai_download(self, then=None):
+        """Scarica etichette e modello (~330 MB) dentro il programma, con avanzamento e ripresa. Niente wget."""
+        if self.ai_task is not None: return
+
+        def work(ctx):
+            os.makedirs(PANNS_DIR, exist_ok=True)
+            if not (os.path.isfile(PANNS_LABELS) and os.path.getsize(PANNS_LABELS) > 0):
+                ctx.status.emit("⬇ Downloading AI labels...")
+                download_file(PANNS_LABELS_URL, PANNS_LABELS, check=ctx.check, min_bytes=1000)
+            if not (os.path.isfile(PANNS_CKPT) and os.path.getsize(PANNS_CKPT) >= PANNS_CKPT_MIN):
+                def prog(done, total):
+                    if total: ctx.progress.emit(int(done / total * 100))
+                    ctx.status.emit(f"⬇ Downloading AI model: {done / 1e6:.0f}" + (f" / {total / 1e6:.0f} MB" if total else " MB"))
+                download_file(PANNS_CKPT_URL, PANNS_CKPT, progress=prog, check=ctx.check, min_bytes=PANNS_CKPT_MIN)
+            return True
+
+        task = TaskThread(work)
+        task.progress.connect(self.scan_progress.setValue); task.status.connect(self.scan_info_lbl.setText)
+        task.done.connect(lambda _r: self._ai_download_finished(None, then))
+        task.failed.connect(lambda msg: self._ai_download_finished(msg, None))
+        self.ai_task = task
+        self.scan_progress.setValue(0); self.scan_progress.setVisible(True)
+        self.refresh_ai_status(); self._start_task(task)
+
+    def _ai_download_finished(self, error, then):
+        self.ai_task = None; self.scan_progress.setVisible(False); self.refresh_ai_status()
+        if error == "cancelled":
+            self.scan_info_lbl.setText("⏹ Download cancelled. Press the button again to resume where it stopped.")
+        elif error:
+            self.scan_info_lbl.setText(f"❌ AI model download failed: {error}")
+        else:
+            self.scan_info_lbl.setText("✅ AI model downloaded. It is loaded the first time you scan a folder.")
+            if then: then()
+
+    def _ask_model_choice(self):
+        """Il modello manca: 'download' | 'noai' | 'cancel'."""
+        box = QMessageBox(self); box.setWindowTitle("AI model not downloaded")
+        box.setText("The AI model (~330 MB) has not been downloaded yet.\n\nDownload it now, or scan without AI tags (files are tagged \"No AI\" and can be re-analyzed later)?")
+        b_dl = box.addButton("Download now", QMessageBox.AcceptRole)
+        b_no = box.addButton("Scan without AI", QMessageBox.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.exec(); c = box.clickedButton()
+        return 'download' if c is b_dl else ('noai' if c is b_no else 'cancel')
+
     def start_scan(self, folder_path, mode="ai"):
         if self.scan_thread is not None and self.scan_thread.isRunning():
             self.scan_info_lbl.setText("⏳ A scan is already running...")
             return
+        use_ai = True
+        if mode in ("ai", "retag"):
+            st = ai_status()
+            if st == 'need_model':
+                choice = self._ask_model_choice() if mode == "ai" else 'download'
+                if choice == 'cancel': return
+                if choice == 'download':
+                    if self.ai_task is not None:
+                        self.scan_info_lbl.setText("⏳ The AI model is still downloading..."); return
+                    self.ai_download(then=lambda: self.start_scan(folder_path, mode)); return
+                use_ai = False
+            elif st == 'missing_libs':
+                if mode == "retag": self.scan_info_lbl.setText("⚠️ The AI is not installed: use the 'How to enable the AI' button."); return
+                use_ai = False
         self.scan_progress.setVisible(True)
         self.scan_progress.setValue(0)
-        self.scan_info_lbl.setText(f"{'Analyzing BPM/Key' if mode == 'bpm' else 'Scanning'}: {folder_path}...")
-        self.scan_thread = AnalyzeWorker(folder_path) if mode == "bpm" else ScanWorker(folder_path)
+        label = {"bpm": "Analyzing BPM/Key", "retag": "Re-running AI"}.get(mode, "Scanning")
+        self.scan_info_lbl.setText(f"{label}: {folder_path}...")
+        self.scan_thread = (AnalyzeWorker(folder_path) if mode == "bpm"
+                            else ScanWorker(folder_path, use_ai=use_ai, retag=(mode == "retag")))
+        if mode == "ai" and not use_ai and ai_status() == 'missing_libs':
+            self.scan_thread.ai_error = "PyTorch / panns-inference not installed"
         self.scan_thread.progress.connect(self.scan_progress.setValue)
         self.scan_thread.log.connect(self.scan_info_lbl.setText)
         self.scan_thread.scan_done.connect(lambda count: self.on_scan_completed(count, folder_path, mode))
@@ -1643,10 +1863,18 @@ class RndSndApp(QMainWindow):
 
     def on_scan_completed(self, count, path, mode="ai"):
         self.scan_progress.setVisible(False)
+        err = getattr(self.scan_thread, 'ai_error', None)
         if mode == "bpm": self.scan_info_lbl.setText(f"✅ BPM/Key analysis complete. {count} files analyzed.")
-        else: self.scan_info_lbl.setText(f"✅ Scan Complete. {count} new files.")
+        elif mode == "retag":
+            self.scan_info_lbl.setText(f"✅ AI re-run complete: {count} files tagged." if not err
+                                       else f"⚠️ AI could not run: {err}. Nothing was changed.")
+        else:
+            msg = f"✅ Scan Complete. {count} new files."
+            if err and count: msg += f" ⚠️ AI unavailable ({err}): they are tagged \"No AI\" — fix it, then right-click the folder > Re-run AI."
+            self.scan_info_lbl.setText(msg)
         if self.current_browsing_path == path:
             self.update_table_from_db(path)
+        self.refresh_ai_status()
 
     def update_table_from_db(self, folder_path):
         prefix = folder_prefix(folder_path)   # "Music" non include "Music2" e % _ non sono jolly
