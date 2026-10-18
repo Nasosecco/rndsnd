@@ -12,7 +12,7 @@ jobs:
     strategy:
       matrix:
         # Specifica i tre sistemi operativi su cui GitHub avvierà le macchine virtuali
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-13]
 
     steps:
     - name: Scarica il codice del repository
