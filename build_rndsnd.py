@@ -25,8 +25,7 @@ datas = [
 # Configurazione PyInstaller
 args = [
     'app_desktop.py',                  
-    f'--name={APP_NAME}',              
-    '--onefile',                       
+    f'--name={APP_NAME}',                                     
     '--windowed',                      
     '--clean',                         
     '--hidden-import=sklearn.utils._cython_blas',
