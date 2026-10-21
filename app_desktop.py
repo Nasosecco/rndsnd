@@ -481,7 +481,7 @@ class ScanWorker(QThread):
         for root, dirs, files in os.walk(self.folder):
             for f in files:
                 if f.lower().endswith(valid_exts):
-                    file_list.append(os.path.join(root, f))
+                    file_list.append(os.path.normpath(os.path.join(root, f)))
         total = len(file_list)
 
         # rimuove dal DB i file di questa cartella che non esistono più
@@ -1737,14 +1737,14 @@ class RndSndApp(QMainWindow):
             self.scan_info_lbl.setText(f"❌ Could not save tags: {e}")
 
     def on_folder_clicked(self, index):
-        path = self.dir_model.fileInfo(index).absoluteFilePath()
+        path = os.path.normpath(self.dir_model.fileInfo(index).absoluteFilePath())
         self.current_browsing_path = path
         self.update_table_from_db(path)
 
     def open_tree_context_menu(self, position):
         indexes = self.tree.selectedIndexes()
         if len(indexes) > 0:
-            path = self.dir_model.fileInfo(indexes[0]).absoluteFilePath()
+            path = os.path.normpath(self.dir_model.fileInfo(indexes[0]).absoluteFilePath())
             menu = QMenu()
             name = os.path.basename(path) or path
             scan_action = QAction(f"✨ Scan '{name}' with AI", self)
