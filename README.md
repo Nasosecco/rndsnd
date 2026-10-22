@@ -19,8 +19,15 @@ The program is designed to be "Plug & Play". All complex components, including t
 
 ### Windows
 1. Go to the **Releases** tab on the right side of the GitHub page.
-2. Download the `.exe` file or the `.zip` package for Windows.
-3. If you downloaded the zip, extract it. Double-click the executable file to launch the program. No installation is required!
+2. Download the `.zip` package for Windows and extract it into a folder.
+3. Double-click the executable file `rndsnd.exe` to launch the program. No installation is required!
+
+**Note for compressed files support (m4a, aac, wma):**
+The program natively reads WAV, FLAC, and OGG files. For the Artificial Intelligence to decode and analyze proprietary compressed formats, your system must have `FFmpeg` installed. 
+If you don't have it, you can install it in two minutes:
+1. Open **Windows PowerShell** as Administrator.
+2. Type the command `winget install ffmpeg` and press Enter (accept the terms if prompted).
+3. Restart your computer to apply the changes. The next time you launch rndsnd, scanning these formats will work correctly.
 
 ### macOS
 1. Go to the **Releases** tab on GitHub.
@@ -42,4 +49,3 @@ The program is designed to be "Plug & Play". All complex components, including t
 ![The Multitrack Editor](assets/multitrack.png)
 ![The Library and Clip  Editor](assets/mixer.png)
 ![The Live Generative Mixer Editor](assets/LiveMix.png)
-
