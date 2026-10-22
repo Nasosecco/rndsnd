@@ -15,7 +15,8 @@ A powerful software to explore, manage, and remix your audio library in new and 
 
 ## Installation
 
-The program is designed to be "Plug & Play". All complex components, including the ~330 MB Artificial Intelligence models required by the scanner, are conveniently managed and downloaded from within the app.
+The program is designed to be lightweight and "Plug & Play". To keep the initial download size as small as possible, the heavy Artificial Intelligence engine (PyTorch) and the required AI models (~330 MB) are **not** included in the base download. 
+Instead, if you want to use the smart AI Scanner, you can conveniently download and install them directly from within the app by clicking the dedicated "Download AI model" button.
 
 ### Windows
 1. Go to the **Releases** tab on the right side of the GitHub page.
