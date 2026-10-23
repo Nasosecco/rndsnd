@@ -12,34 +12,22 @@ import traceback
 import warnings
 import shutil
 import json
-import copy
-import importlib.util
-import urllib.request
-import urllib.error
-import http.client
+import csv
 
 import numpy as np
 import librosa
 import soundfile as sf
 
-# Pydub: usato solo come fallback per formati che libsndfile non legge (m4a, wma, aac...)
+# Pydub: fallback per m4a, aac, wma (richiede ffmpeg)
 try:
     from pydub import AudioSegment
     HAVE_PYDUB = True
-except Exception:  # es. Python 3.13 senza audioop
+except Exception:
     AudioSegment = None
     HAVE_PYDUB = False
 
-# --- CONFIGURATION ---
 warnings.filterwarnings("ignore")
 APP_VERSION = "0.11.0"
-
-# --- MOTORE IA (PANNs) ---
-# PyTorch NON viene importato all'avvio (e' lento e pesante): qui si controlla solo se e' installato.
-# Il vero import avviene nel thread di scansione, quando serve (vedi load_ai_model).
-def _module_available(name):
-    try: return importlib.util.find_spec(name) is not None
-    except Exception: return False
 
 # Fix ALSA errors on Linux
 def alsa_error_handler(filename, line, function, err, fmt): pass
@@ -75,9 +63,7 @@ from PySide6.QtMultimedia import (QMediaPlayer, QAudioOutput, QMediaDevices, QAu
                                   QAudioFormat)
 
 # =====================================================================
-#  PERCORSI
-#  FIX: il DB stava in sys._MEIPASS (cartella dell'app / temporanea).
-#  Ora dati e output stanno in ~/rndsnd, indipendenti dall'installazione.
+#  PERCORSI E DIRECTORY
 # =====================================================================
 def get_base_path():
     try: return sys._MEIPASS
@@ -94,12 +80,10 @@ def prepare_dirs():
     for d in (APP_DIR, OUTPUT_DIR, DRAG_DIR):
         try: os.makedirs(d, exist_ok=True)
         except Exception: pass
-    # migra il vecchio database (accanto all'app) se il nuovo non esiste ancora
     legacy = os.path.join(get_base_path(), "audio.db")
     if not os.path.exists(DB_PATH) and os.path.exists(legacy):
         try: shutil.copy2(legacy, DB_PATH)
         except Exception: pass
-    # pulizia dei file di drag più vecchi di 1 giorno
     try:
         limit = time.time() - 86400
         for f in os.listdir(DRAG_DIR):
@@ -115,23 +99,19 @@ prepare_dirs()
 # =====================================================================
 #  UTILITY DB
 # =====================================================================
-def esc_like(s):
-    """Escape dei caratteri speciali per LIKE ... ESCAPE '\\'."""
-    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
+def esc_like(s): return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 def folder_prefix(folder):
     folder = os.path.normpath(folder)
     return folder if folder.endswith(os.sep) else folder + os.sep
-
 def fmt_time(sec):
     sec = max(0, int(sec))
     return f"{sec // 60:02d}:{sec % 60:02d}"
 
 # =====================================================================
-#  MOTORE AUDIO "OFFLINE" (condiviso da Mixer e Live Mix)
+#  MOTORE AUDIO "OFFLINE"
 # =====================================================================
 MIX_SR = 44100
-RMS_TARGET = 0.2   # livello medio di ogni clip dopo la normalizzazione (~ -14 dBFS)
+RMS_TARGET = 0.2
 
 GRAINS = [("Micro (0.2s - 2s)", 200, 2000), ("Short (2s - 5s)", 2000, 5000),
           ("Medium (5s - 15s)", 5000, 15000), ("Long (15s - 30s)", 15000, 30000),
@@ -149,8 +129,6 @@ def _to_stereo_44k(data, sr):
     return np.ascontiguousarray(data, dtype=np.float32)
 
 def read_clip(path, clip_ms, rng):
-    """Legge SOLO la porzione casuale richiesta (non l'intero file).
-    Ritorna (array stereo float32 a 44.1k, start_ms) oppure None se illeggibile."""
     try:
         info = sf.info(path)
         sr, frames = info.samplerate, info.frames
@@ -162,7 +140,7 @@ def read_clip(path, clip_ms, rng):
         return _to_stereo_44k(data, sr), start * 1000.0 / sr
     except Exception:
         pass
-    if HAVE_PYDUB:  # fallback (richiede ffmpeg per m4a/wma/aac)
+    if HAVE_PYDUB:
         try:
             a = AudioSegment.from_file(path)
             start = 0 if len(a) <= clip_ms else rng.randint(0, len(a) - clip_ms)
@@ -180,7 +158,6 @@ def rms_normalize(x, target=RMS_TARGET, max_gain=10.0):
     return x * min(target / r, max_gain)
 
 def apply_pan(x, p):
-    """Pan equal-power, p in [-1, 1] (0 = centro, guadagno unitario)."""
     ang = (p + 1.0) * math.pi / 4.0
     y = x.copy()
     y[:, 0] *= math.cos(ang) * math.sqrt(2.0)
@@ -192,10 +169,6 @@ def _fade(n, rising):
     return c(np.linspace(0.0, math.pi / 2, max(1, n), dtype=np.float32)).astype(np.float32)
 
 def build_layer(src, n_frames, min_ms, max_ms, xf_ms, randomize, ctx, label, rng, prog=None, grid_frames=0):
-    """Costruisce UN layer lungo n_frames mettendo clip casuali una dopo l'altra.
-    xf_ms > 0  -> crossfade da DJ tra clip consecutive (modo 1 layer)
-    randomize  -> pan e volume casuali per clip (modo multi-layer)
-    grid_frames > 0 -> la lunghezza di ogni clip diventa un multiplo di questa griglia (tagli a tempo)"""
     buf = np.zeros((n_frames, 2), np.float32)
     log = []
     pos = 0; fails = 0; first = True; prev_len = 0
@@ -208,10 +181,8 @@ def build_layer(src, n_frames, min_ms, max_ms, xf_ms, randomize, ctx, label, rng
         got = read_clip(path, rng.randint(min_ms, max_ms), rng)
         if got is None or len(got[0]) < min_len:
             fails += 1
-            # FIX: prima, se nessun file era leggibile, il ciclo girava all'infinito
             if fails >= 40:
-                raise RuntimeError("Nessun file leggibile tra le sorgenti scelte "
-                                   "(file corrotti o formato non supportato / ffmpeg mancante?).")
+                raise RuntimeError("Nessun file leggibile tra le sorgenti scelte.")
             continue
         fails = 0
         seg, start_ms = got
@@ -238,9 +209,9 @@ def build_layer(src, n_frames, min_ms, max_ms, xf_ms, randomize, ctx, label, rng
             start = pos
         end = min(n_frames, start + n)
         buf[start:end] += seg[:end - start]
-        nominal = pos   # posizione "musicale" della clip (prima del crossfade)
+        nominal = pos
         log.append(f"{label}: {os.path.basename(path)} [{fmt_time(start_ms/1000)}-{fmt_time(start_ms/1000 + n/MIX_SR)}] @ t={nominal / MIX_SR:.2f}s")
-        pos = (nominal + n) if grid_frames > 0 else (start + n)   # con la griglia non c'è deriva
+        pos = (nominal + n) if grid_frames > 0 else (start + n)
         prev_len = n; first = False
         if prog: prog(min(1.0, pos / n_frames))
     f = max(1, min(fade, n_frames // 2))
@@ -249,7 +220,6 @@ def build_layer(src, n_frames, min_ms, max_ms, xf_ms, randomize, ctx, label, rng
     return buf, log
 
 def compute_peaks(stereo, bins=2048):
-    """Min/max per bin (mono) per disegnare la forma d'onda."""
     mono = (stereo[:, 0] + stereo[:, 1]) * 0.5
     n = len(mono); step = max(1, n // bins); m = (n // step) * step
     r = mono[:m].reshape(-1, step)
@@ -262,14 +232,11 @@ def render_mix(layers, gains):
     return acc
 
 def export_mix(audio, base_name, header_lines, log_lines, soft=True):
-    """Esporta in MP3 (libsndfile -> pydub/ffmpeg) con fallback automatico a WAV. + file .txt di log."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    # nome unico: due mix nello stesso secondo non si sovrascrivono
     stem, k = base_name, 1
     while any(os.path.exists(os.path.join(OUTPUT_DIR, stem + e)) for e in (".mp3", ".wav", ".txt")):
         k += 1; stem = f"{base_name}_{k}"
     base_name = stem
-    # soft=True: soft-limiter (mix generativi). soft=False: nessuna colorazione, solo protezione da overflow (multitraccia)
     data = (np.tanh(audio) if soft else np.clip(audio, -1.0, 1.0)).astype(np.float32)
     path = None; note = ""
     mp3 = os.path.join(OUTPUT_DIR, base_name + ".mp3")
@@ -301,7 +268,7 @@ def export_mix(audio, base_name, header_lines, log_lines, soft=True):
     return path, note
 
 # =====================================================================
-#  THREAD GENERICO (per non bloccare mai la GUI)
+#  THREAD GENERICO
 # =====================================================================
 class TaskThread(QThread):
     progress = Signal(int)
@@ -328,7 +295,6 @@ class TaskThread(QThread):
             self.failed.emit(str(e)); return
         self.done.emit(res)
 
-# --- INTELLIGENT SCANNER (MULTI-SAMPLE) ---
 def get_duration(path):
     try: return float(sf.info(path).duration)
     except Exception: pass
@@ -336,108 +302,57 @@ def get_duration(path):
     except TypeError: return float(librosa.get_duration(filename=path))
 
 # =====================================================================
-#  IA: stato, download del modello (senza wget), caricamento, etichettatura
+#  IA: MODELLO ONNX INTEGRATO (Senza Download)
 # =====================================================================
-PANNS_DIR = os.path.join(os.path.expanduser("~"), "panns_data")           # stessa cartella che usa la libreria
-PANNS_CKPT = os.path.join(PANNS_DIR, "Cnn14_mAP=0.431.pth")
-PANNS_LABELS = os.path.join(PANNS_DIR, "class_labels_indices.csv")
-PANNS_CKPT_URL = "https://zenodo.org/record/3987831/files/Cnn14_mAP%3D0.431.pth?download=1"
-PANNS_LABELS_URL = "http://storage.googleapis.com/us_audioset/youtube_corpus/v1/csv/class_labels_indices.csv"
-PANNS_CKPT_MIN = 3e8        # stessa soglia della libreria: sotto, il file e' considerato incompleto
-UNTAGGED = ("No AI", "Scan Error", "Unknown")   # tag che "Rianalizza con IA" sostituisce (i tag scritti a mano restano)
-
-def ai_status():
-    """'missing_libs' (PyTorch/panns_inference non installati) | 'need_model' (file da scaricare) | 'ready'."""
-    if not (_module_available('torch') and _module_available('panns_inference')): return 'missing_libs'
-    ok = (os.path.isfile(PANNS_LABELS) and os.path.getsize(PANNS_LABELS) > 0 and
-          os.path.isfile(PANNS_CKPT) and os.path.getsize(PANNS_CKPT) >= PANNS_CKPT_MIN)
-    return 'ready' if ok else 'need_model'
-
-def download_file(url, dest, progress=None, check=None, min_bytes=0, timeout=30, chunk=1 << 18):
-    """Scarica in dest con ripresa: i dati arrivano in dest.part e, se il download si interrompe,
-    il tentativo successivo riparte da dove era arrivato (se il server supporta Range)."""
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    part = dest + ".part"
-    have = os.path.getsize(part) if os.path.exists(part) else 0
-    headers = {'User-Agent': 'rndsnd'}
-    if have: headers['Range'] = f'bytes={have}-'
-    resp = None
-    try:
-        resp = urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout)
-    except urllib.error.HTTPError as e:
-        if not (e.code == 416 and have):      # 416 + .part esistente: il file era gia' completo
-            raise RuntimeError(f"server answered HTTP {e.code}") from None
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"network error: {e.reason}") from None
-    except OSError as e:
-        raise RuntimeError(f"network error: {e}") from None
-    total = 0
-    if resp is not None:
-        with resp:
-            clen = int(resp.headers.get('Content-Length') or 0)
-            if have and getattr(resp, 'status', 200) == 206: mode = 'ab'; total = have + clen if clen else 0
-            else: mode = 'wb'; have = 0; total = clen       # il server ignora Range: si riparte da zero
-            done = have
-            try:
-                with open(part, mode) as f:
-                    while True:
-                        if check: check()
-                        buf = resp.read(chunk)
-                        if not buf: break
-                        f.write(buf); done += len(buf)
-                        if progress: progress(done, total)
-            except (http.client.IncompleteRead, OSError) as e:
-                raise RuntimeError(f"connection interrupted ({e.__class__.__name__}); press the button again to resume") from None
-    size = os.path.getsize(part)
-    if total and size != total:
-        raise RuntimeError(f"incomplete download ({size / 1e6:.0f} of {total / 1e6:.0f} MB); press the button again to resume")
-    if size < min_bytes:
-        os.remove(part)
-        raise RuntimeError("the downloaded file is too small (probably an error page); try again later")
-    os.replace(part, dest)
+PANNS_CKPT = resource_path(os.path.join("model", "Cnn14.onnx"))
+PANNS_LABELS = resource_path(os.path.join("model", "class_labels_indices.csv"))
+UNTAGGED = ("No AI", "Scan Error", "Unknown")
 
 def load_ai_model():
-    """Importa PyTorch e panns_inference SOLO ora. I file sono gia' scaricati da noi, quindi la libreria
-    non chiama wget. Usa la GPU se PyTorch ne trova una, altrimenti la CPU. Ritorna (modello, device)."""
-    import torch
-    from panns_inference import AudioTagging
-    try:
-        model = AudioTagging(checkpoint_path=PANNS_CKPT, device='cuda')
-    except Exception as e:
-        # PyTorch >= 2.6 carica i checkpoint in modalita' "weights_only": se il file ufficiale lo rifiuta, si ritenta
-        if 'weights_only' not in str(e) and 'npickl' not in str(e): raise
-        orig = torch.load
-        torch.load = lambda *a, **k: orig(*a, **{**k, 'weights_only': False})
-        try: model = AudioTagging(checkpoint_path=PANNS_CKPT, device='cuda')
-        finally: torch.load = orig
-    return model, str(getattr(model, 'device', 'cpu'))
+    import onnxruntime as ort
+    if not os.path.exists(PANNS_CKPT) or not os.path.exists(PANNS_LABELS):
+        raise RuntimeError("File del modello ONNX IA non trovati. Ricompila il programma includendo la cartella 'model'.")
+        
+    labels = []
+    with open(PANNS_LABELS, 'r', encoding='utf-8') as f:
+        reader = csv.reader(f)
+        next(reader)
+        for row in reader:
+            labels.append(row[2])
+            
+    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+    session = ort.InferenceSession(PANNS_CKPT, providers=providers)
+    return (session, labels), session.get_providers()[0]
 
-def tag_audio(model, path, duration):
-    """Le 3 categorie piu' probabili su fino a 3 frammenti da 5 s (inizio, meta', fine)."""
+def tag_audio(model_data, path, duration):
+    session, labels = model_data
     chunk_dur = 5.0
     if duration < 10: offsets = [0]
     else: offsets = [max(0, o) for o in (0, duration / 2 - chunk_dur / 2, duration - chunk_dur)]
     acc = None
+    input_name = session.get_inputs()[0].name
     for off in offsets:
         y, _ = librosa.load(path, sr=32000, mono=True, offset=off, duration=chunk_dur)
         if len(y) < 32000: y = np.pad(y, (0, 32000 - len(y)), mode='constant')
-        clipwise, _ = model.inference(y[None, :])
-        acc = clipwise[0].copy() if acc is None else acc + clipwise[0]
+        inputs = {input_name: y[None, :].astype(np.float32)}
+        outputs = session.run(None, inputs)
+        clipwise = outputs[0][0]
+        acc = clipwise.copy() if acc is None else acc + clipwise
     top = np.argsort(acc)[::-1][:3]
-    return ", ".join(model.labels[int(k)] for k in top)
+    return ", ".join(labels[int(k)] for k in top)
 
 class ScanWorker(QThread):
     progress = Signal(int)
     log = Signal(str)
-    scan_done = Signal(int)   # FIX: prima ridefiniva QThread.finished
+    scan_done = Signal(int)
 
     def __init__(self, folder, use_ai=True, retag=False):
         super().__init__()
         self.folder = folder
-        self.use_ai = use_ai          # False: scansione senza IA (tag "No AI")
-        self.retag = retag            # True: rianalizza solo i file con tag "No AI" / "Scan Error" / "Unknown"
+        self.use_ai = use_ai
+        self.retag = retag
         self.ai_model = None
-        self.ai_error = None          # motivo per cui l'IA non e' stata usata (mostrato all'utente)
+        self.ai_error = None
         self._ai_tried = False
 
     def run(self):
@@ -452,22 +367,16 @@ class ScanWorker(QThread):
             if conn is not None:
                 try: conn.commit(); conn.close()
                 except Exception: pass
-            self.scan_done.emit(count)   # sempre emesso (prima poteva restare "Scanning..." per sempre)
+            self.scan_done.emit(count)
 
     def _ensure_model(self):
-        """Carica il modello UNA volta sola. Ritorna True se e' disponibile."""
         if self.ai_model is not None: return True
         if self._ai_tried or not self.use_ai: return False
         self._ai_tried = True
-        st = ai_status()
-        if st != 'ready':
-            self.ai_error = ("PyTorch / panns-inference not installed" if st == 'missing_libs'
-                             else "AI model files not downloaded")
-            return False
-        self.log.emit("🧠 Loading AI model...")
+        self.log.emit("🧠 Loading embedded AI model...")
         try:
             self.ai_model, dev = load_ai_model()
-            self.log.emit(f"🧠 AI model ready ({'GPU' if 'cuda' in dev else 'CPU'})")
+            self.log.emit(f"🧠 AI model ready ({dev})")
             return True
         except Exception as e:
             traceback.print_exc()
@@ -484,7 +393,6 @@ class ScanWorker(QThread):
                     file_list.append(os.path.normpath(os.path.join(root, f)))
         total = len(file_list)
 
-        # rimuove dal DB i file di questa cartella che non esistono più
         prefix = folder_prefix(self.folder)
         cur.execute("SELECT path FROM files WHERE substr(path, 1, ?) = ?", (len(prefix), prefix))
         present = set(file_list)
@@ -502,7 +410,7 @@ class ScanWorker(QThread):
                 continue
 
             have_ai = self._ensure_model()
-            tags = "Unknown"; duration = 0.0; size = 0   # FIX: 'size' ora è sempre definita
+            tags = "Unknown"; duration = 0.0; size = 0
             try:
                 size = os.path.getsize(path)
                 duration = get_duration(path)
@@ -519,15 +427,13 @@ class ScanWorker(QThread):
         return new_files
 
     def _retag(self, conn):
-        """Rianalizza con l'IA i file gia' nel database marcati "No AI" / "Scan Error" / "Unknown".
-        I tag scritti a mano non vengono toccati."""
         cur = conn.cursor()
         prefix = folder_prefix(self.folder)
         cur.execute(f"SELECT id, path, duration FROM files WHERE substr(path, 1, ?) = ? AND tags IN ({','.join('?' * len(UNTAGGED))})",
                     (len(prefix), prefix) + UNTAGGED)
         rows = [r for r in cur.fetchall() if os.path.exists(r[1])]
         if not rows: return 0
-        if not self._ensure_model(): return 0          # senza modello non si sovrascrive nulla
+        if not self._ensure_model(): return 0
         done = 0
         for i, (fid, path, dur) in enumerate(rows):
             if self.isInterruptionRequested(): break
@@ -542,7 +448,6 @@ class ScanWorker(QThread):
             self.log.emit(f"🧠 {os.path.basename(path)[:18]}... [{tags}]")
         return done
 
-
 # =====================================================================
 #  ANALISI BPM / TONALITA'
 # =====================================================================
@@ -550,10 +455,9 @@ NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 ALL_KEYS = [f"{n} {m}" for n in NOTE_NAMES for m in ("major", "minor")]
 _KS_MAJ = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
 _KS_MIN = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
-_CAMELOT_MAJ = [8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6, 1]   # numero Camelot della tonalita' maggiore per pitch class
+_CAMELOT_MAJ = [8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6, 1]
 
 def estimate_key(chroma_mean):
-    """Krumhansl-Schmuckler: ritorna (correlazione, nome tonalita')."""
     best = (-2.0, None)
     for pc in range(12):
         for prof, mode in ((_KS_MAJ, "major"), (_KS_MIN, "minor")):
@@ -567,18 +471,15 @@ def _camelot(key):
     return (_CAMELOT_MAJ[pc], "B") if mode == "major" else (_CAMELOT_MAJ[(pc + 3) % 12], "A")
 
 def compatible_keys(key):
-    """Tonalita' mixabili secondo la ruota di Camelot: stessa, +-1 quinta, relativa maggiore/minore."""
     if key not in ALL_KEYS: return [key]
     num, let = _camelot(key)
     want = {(num, let), ((num % 12) + 1, let), (((num - 2) % 12) + 1, let), (num, "A" if let == "B" else "B")}
     return [k for k in ALL_KEYS if _camelot(k) in want]
 
-MIN_RHYTHM_CLARITY = 0.30   # sotto: niente BPM (rumore, pad, ambienti senza pulsazione)
-MIN_CHROMA_CONTRAST = 0.30  # sotto: niente tonalita' (rumore, percussioni)
+MIN_RHYTHM_CLARITY = 0.30
+MIN_CHROMA_CONTRAST = 0.30
 
 def analyze_bpm_key(path, max_sec=30):
-    """Ritorna (bpm|None, tonalita'|None). Analizza max_sec secondi presi dal centro del file.
-    Se il segnale non ha una pulsazione o un'armonia chiare, il valore resta None."""
     dur = get_duration(path)
     if dur < 3: return None, None
     offset = max(0.0, dur / 2 - max_sec / 2) if dur > max_sec else 0.0
@@ -591,10 +492,9 @@ def analyze_bpm_key(path, max_sec=30):
         tempo, beats = librosa.beat.beat_track(onset_envelope=env, sr=sr, hop_length=hop)
         t = float(np.atleast_1d(tempo)[0])
         bt = librosa.frames_to_time(beats, sr=sr, hop_length=hop)
-        if len(bt) >= 8:   # media su tutti i battiti: elimina l'errore di quantizzazione
+        if len(bt) >= 8:
             refined = 60.0 * (len(bt) - 1) / (bt[-1] - bt[0])
             if abs(refined - t) / max(t, 1e-6) < 0.04: t = refined
-        # regolarita' del ritmo: autocorrelazione dell'envelope al periodo del battito
         e = env - env.mean(); ac = librosa.autocorrelate(e)
         if ac[0] > 0 and t > 0:
             ac = ac / ac[0]
@@ -616,7 +516,6 @@ def analyze_bpm_key(path, max_sec=30):
     return bpm, key
 
 class AnalyzeWorker(QThread):
-    """Calcola BPM e tonalita' dei file di una cartella che non sono ancora stati analizzati."""
     progress = Signal(int)
     log = Signal(str)
     scan_done = Signal(int)
@@ -637,7 +536,6 @@ class AnalyzeWorker(QThread):
                 try: bpm, key = analyze_bpm_key(path)
                 except Exception as e:
                     print(f"BPM/key error {os.path.basename(path)}: {e}"); bpm, key = None, None
-                # 0 / '-' = "analizzato ma indeterminato" (non verra' rianalizzato ogni volta)
                 cur.execute("UPDATE files SET bpm = ?, tonality = ? WHERE id = ?", (bpm or 0.0, key or "-", fid))
                 done += 1
                 if done % 10 == 0: conn.commit()
@@ -653,16 +551,10 @@ class AnalyzeWorker(QThread):
 
 
 # =====================================================================
-#  MULTITRACCIA: modello del progetto + mix a blocchi
-#  Il progetto e' fatto di dizionari semplici (facili da salvare in JSON e da annullare):
-#    track = {name, gain, pan, mute, solo, clips:[clip]}
-#    clip  = {id, name, path, media_a, media_b, pos, in, len, gain, fade_in, fade_out}
-#  "media_a..media_b" e' il materiale inserito (secondi del file originale); "in"/"len" e' la
-#  finestra visibile dentro quel materiale; "pos" e' l'inizio sulla linea del tempo.
-#  I file originali non vengono mai modificati.
+#  MULTITRACCIA
 # =====================================================================
 TRACK_COLORS = ['#ff9800', '#29b6f6', '#66bb6a', '#ec407a', '#ab47bc', '#ffee58', '#26a69a', '#ef5350']
-MT_BLOCK = 64   # campioni per colonna della piramide dei picchi
+MT_BLOCK = 64
 
 def new_track(n):
     return {'name': f"Track {n}", 'gain': 1.0, 'pan': 0.0, 'mute': False, 'solo': False, 'clips': []}
@@ -674,18 +566,16 @@ def media_key(path, a, b):
     return (path, round(float(a), 3), round(float(b), 3))
 
 def read_segment(path, a, b):
-    """Decodifica SOLO [a, b] secondi del file, come stereo float32 a 44.1 kHz."""
     try:
         info = sf.info(path); sr = info.samplerate
         data, _ = sf.read(path, start=int(a * sr), stop=int(b * sr), dtype='float32', always_2d=True)
     except Exception:
-        y, sr = librosa.load(path, sr=None, mono=False, offset=a, duration=b - a)   # fallback (m4a ecc.)
+        y, sr = librosa.load(path, sr=None, mono=False, offset=a, duration=b - a)
         data = (y.T if y.ndim > 1 else y[:, None]).astype(np.float32)
     if len(data) == 0: raise RuntimeError("segmento vuoto")
     return _to_stereo_44k(data, sr)
 
 class MtMedia:
-    """Audio decodificato di un segmento + piramide dei picchi per disegnare la forma d'onda in fretta."""
     def __init__(self, arr):
         self.arr = arr
         mono = (arr[:, 0] + arr[:, 1]) * 0.5
@@ -699,10 +589,9 @@ class MtMedia:
         self.duration = len(arr) / MIX_SR
 
     def columns(self, t0, length, width):
-        """Min/max per ciascuna delle `width` colonne di pixel per l'intervallo [t0, t0+length] (secondi)."""
         s0 = max(0, int(t0 * MIX_SR)); s1 = min(len(self.mono), int((t0 + length) * MIX_SR))
         if width <= 0 or s1 <= s0: return None
-        spp = (s1 - s0) / width                      # campioni per pixel
+        spp = (s1 - s0) / width
         if spp >= MT_BLOCK * 2:
             b0, b1 = s0 // MT_BLOCK, max(s0 // MT_BLOCK + 1, s1 // MT_BLOCK)
             mn, mx = self.pmin[b0:b1], self.pmax[b0:b1]
@@ -718,14 +607,12 @@ def pan_gains(p):
     return math.cos(ang) * math.sqrt(2.0), math.sin(ang) * math.sqrt(2.0)
 
 def mt_length(project):
-    """Durata del progetto in secondi (fine dell'ultimo clip)."""
     end = 0.0
     for t in project['tracks']:
         for c in t['clips']: end = max(end, c['pos'] + c['len'])
     return end
 
 def build_snapshot(project, media):
-    """Lista ordinata di clip "pronti da suonare" (guadagni, pan, mute e solo gia' risolti)."""
     any_solo = any(t['solo'] for t in project['tracks'])
     items = []
     for t in project['tracks']:
@@ -747,12 +634,11 @@ def build_snapshot(project, media):
     return items
 
 def mt_mix_block(items, pos, frames):
-    """Somma i clip che cadono nel blocco [pos, pos+frames). Stessa funzione per ascolto ed esportazione."""
     out = np.zeros((frames, 2), np.float32)
     end = pos + frames
     for it in items:
         s = it['start']
-        if s >= end: break                   # ordinati per inizio: i successivi sono tutti dopo
+        if s >= end: break
         n = it['n']
         if s + n <= pos: continue
         a = max(pos, s); b = min(end, s + n)
@@ -826,14 +712,12 @@ LIGHT_STYLE = COMMON_BUTTON_STYLE + """
 
 # --- INTERFACE COMPONENTS ---
 class SortItem(QTableWidgetItem):
-    """Cella ordinabile per valore (numeri, durate, dimensioni) e non per testo."""
     def __lt__(self, other):
         a = self.data(Qt.UserRole + 1); b = other.data(Qt.UserRole + 1)
         if a is not None and b is not None:
             try: return a < b
             except TypeError: pass
         return self.text().lower() < other.text().lower()
-
 
 class DragButton(QPushButton):
     def __init__(self, title, parent=None):
@@ -846,7 +730,6 @@ class DragButton(QPushButton):
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
-        # FIX: il drag partiva ad ogni minimo movimento; ora serve la distanza di drag di sistema
         if (e.buttons() & Qt.LeftButton) and self.main_window and self._press is not None:
             if (e.position().toPoint() - self._press).manhattanLength() >= QApplication.startDragDistance():
                 self._press = None
@@ -859,13 +742,11 @@ class DragButton(QPushButton):
         self._press = None
         super().mouseReleaseEvent(e)
 
-
 class ClipList(QListWidget):
-    """Elenco dei clip: trascinabile verso altri programmi (es. Audacity), Canc per eliminare."""
     def __init__(self, main, editable=True):
         super().__init__()
         self.main = main
-        self.editable = editable      # False: copia di consultazione (pannello del Multitrack)
+        self.editable = editable
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragOnly)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection if editable else QAbstractItemView.SingleSelection)
@@ -882,9 +763,7 @@ class ClipList(QListWidget):
             self.main.delete_selected_clips(); return
         super().keyPressEvent(e)
 
-
 class WaveformWidget(QWidget):
-    """Forma d'onda leggera (QPainter + cache) con playhead e click/drag per spostarsi."""
     seekRequested = Signal(float)
 
     def __init__(self, height=48, ruler=False, parent=None):
@@ -916,7 +795,6 @@ class WaveformWidget(QWidget):
         self._cache = None; self.update()
 
     def set_grid(self, beat_sec):
-        """Griglia ritmica (battiti + battuta da 4). 0 = nascosta."""
         beat_sec = float(beat_sec or 0.0)
         if abs(beat_sec - self.grid_sec) > 1e-9: self.grid_sec = beat_sec; self._cache = None; self.update()
 
@@ -992,9 +870,8 @@ class WaveformWidget(QWidget):
 LANE_COLORS = ['#ff9800', '#4caf50', '#29b6f6', '#ec407a', '#ab47bc', '#ffee58', '#26a69a', '#ef5350']
 
 class LiveLane(QFrame):
-    """Una corsia (layer) del Live Mix: mute / solo / volume / re-roll + forma d'onda."""
-    changed = Signal()      # fader volume: sempre immediato
-    toggled = Signal()      # mute / solo: puo' essere quantizzato a tempo
+    changed = Signal()
+    toggled = Signal()
     reroll = Signal(int)
     seekRequested = Signal(float)
 
@@ -1033,14 +910,11 @@ class LiveLane(QFrame):
 
 
 def compute_eff(user, mute, solo):
-    """Guadagno effettivo di ogni layer (0 se muto o escluso da un solo)."""
     L = len(user); base = 1.0 / math.sqrt(max(1, L)); any_solo = any(solo)
     return [base * user[i] if ((not mute[i]) and (solo[i] or not any_solo)) else 0.0 for i in range(L)]
 
 
 class LiveEngine(QIODevice):
-    """Mixer in tempo reale: somma i layer (già in RAM) blocco per blocco e li passa a QAudioSink.
-    Loop sample-accurate, mute/solo/volume applicabili durante la riproduzione."""
     reachedEnd = Signal()
 
     def __init__(self, parent=None):
@@ -1050,7 +924,6 @@ class LiveEngine(QIODevice):
         self._pending = []
         self.n = 0; self.pos = 0; self.loop = True; self._end_sent = False
 
-    # --- stato del mix ---
     def _recompute(self):
         L = len(self.layers)
         if not (len(self._user) == len(self._mute) == len(self._solo) == L): self._eff = [0.0] * L; return
@@ -1075,19 +948,16 @@ class LiveEngine(QIODevice):
             self._recompute()
 
     def set_gains(self, user):
-        """Solo i volumi (immediati); mute/solo restano come sono, anche se ne e' in attesa un cambio."""
         with self._lock:
             self._user = list(user); self._recompute()
 
     def schedule(self, target_frame, kind, payload):
-        """Esegue l'azione esattamente al frame indicato del flusso audio (sample-accurate).
-        target_frame == n significa 'al giro di loop'."""
         with self._lock: self._pending.append((int(target_frame), kind, payload))
 
     def pending_count(self):
         with self._lock: return len(self._pending)
 
-    def _apply(self, kind, payload):          # chiamare con il lock gia' preso
+    def _apply(self, kind, payload):
         if kind == 'replace':
             idx, arr = payload
             if 0 <= idx < len(self.layers) and len(arr) == self.n: self.layers[idx] = arr
@@ -1115,7 +985,6 @@ class LiveEngine(QIODevice):
     def reset(self):
         with self._lock: self.pos = 0; self._end_sent = False
 
-    # --- QIODevice ---
     def isSequential(self): return True
     def bytesAvailable(self): return 65536 + super().bytesAvailable()
     def writeData(self, data): return 0
@@ -1130,28 +999,22 @@ class LiveEngine(QIODevice):
             if n > 0 and self.layers:
                 done = 0
                 while done < frames:
-                    self._apply_due(self.pos)          # azioni programmate che scadono ora
+                    self._apply_due(self.pos)
                     nxt = min((t for t, _, _ in self._pending if self.pos < t < n), default=n)
-                    take = min(frames - done, n - self.pos, nxt - self.pos)   # il blocco si spezza sul punto di scadenza
+                    take = min(frames - done, n - self.pos, nxt - self.pos)
                     if take > 0:
                         for lay, g in zip(self.layers, self._eff):
                             if g > 0: acc[done:done + take] += lay[self.pos:self.pos + take] * np.float32(g)
                         done += take; self.pos += take
                     if self.pos >= n:
-                        self._apply_due(n, include_end=True)   # azioni "al giro di loop"
+                        self._apply_due(n, include_end=True)
                         if self.loop: self.pos = 0
                         else:
                             self.pos = n; ended = not self._end_sent; self._end_sent = True; break
         if ended: self.reachedEnd.emit()
         return (np.tanh(acc) * 32767.0).astype(np.int16).tobytes()
 
-
-
-# =====================================================================
-#  MULTITRACCIA: motore di riproduzione + widget della linea del tempo
-# =====================================================================
 class MtEngine(QIODevice):
-    """Riproduzione del multitraccia: mixa a blocchi i clip (mt_mix_block) e li passa a QAudioSink."""
     reachedEnd = Signal()
 
     def __init__(self, parent=None):
@@ -1193,7 +1056,6 @@ class MtEngine(QIODevice):
 
 
 class RulerWidget(QWidget):
-    """Righello del tempo (clic / trascinamento = sposta il cursore)."""
     def __init__(self, main):
         super().__init__()
         self.m = main
@@ -1224,7 +1086,6 @@ class RulerWidget(QWidget):
 
 
 class MtTrackHeader(QFrame):
-    """Intestazione di una traccia: nome, mute, solo, volume, pan."""
     def __init__(self, main, idx):
         super().__init__()
         self.m = main; self.idx = idx
@@ -1263,7 +1124,7 @@ class MtTrackHeader(QFrame):
 
 
 class TimelineWidget(QWidget):
-    TH = 84   # altezza di una traccia
+    TH = 84
 
     def __init__(self, main):
         super().__init__()
@@ -1274,13 +1135,11 @@ class TimelineWidget(QWidget):
         self.setMinimumHeight(self.TH * 4)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
-    # --- coordinate ---
     def x_of(self, t): return (t - self.m.mt_x0) * self.m.mt_pps
     def t_of(self, x): return x / self.m.mt_pps + self.m.mt_x0
     def clip_rect(self, ti, c):
         return QRectF(self.x_of(c['pos']), ti * self.TH + 4, max(1.0, c['len'] * self.m.mt_pps), self.TH - 8)
 
-    # --- disegno ---
     def paintEvent(self, e):
         m = self.m; th = m.mt_theme; pps = m.mt_pps
         p = QPainter(self); W = self.width()
@@ -1291,7 +1150,7 @@ class TimelineWidget(QWidget):
             if ti == m.mt_sel_track: p.fillRect(0, y, W, self.TH, QColor(th['lane_sel']))
             elif ti % 2: p.fillRect(0, y, W, self.TH, QColor(th['lane_alt']))
             p.setPen(QPen(QColor(th['grid']))); p.drawLine(0, y + self.TH - 1, W, y + self.TH - 1)
-        if m.mt_project.get('snap'):      # griglia ritmica
+        if m.mt_project.get('snap'):
             beat = 60.0 / max(1, m.mt_project.get('bpm', 120))
             if beat * pps >= 8:
                 i = max(0, int(m.mt_x0 / beat))
@@ -1316,7 +1175,7 @@ class TimelineWidget(QWidget):
         media = m.mt_media.get(media_key(c['path'], c['media_a'], c['media_b']))
         fill = QColor(col); fill.setAlpha(45 if dim else 80)
         p.fillRect(r, fill)
-        if media is None:                       # file mancante: tratteggio rosso
+        if media is None:
             p.fillRect(r, QBrush(QColor(220, 50, 50, 140), Qt.BDiagPattern))
         else:
             x_a = max(0.0, r.left()); x_b = min(float(W), r.right())
@@ -1334,7 +1193,6 @@ class TimelineWidget(QWidget):
                         y1 = mid - float(mx[i]) * amp; y2 = mid - float(mn[i]) * amp
                         if y2 - y1 < 1: y2 = y1 + 1
                         p.drawLine(xa + i, int(y1), xa + i, int(y2))
-        # dissolvenze
         fi = c['fade_in'] * m.mt_pps; fo = c['fade_out'] * m.mt_pps
         p.save(); p.setClipRect(r)
         p.setPen(QPen(QColor(255, 255, 255, 170), 1))
@@ -1345,12 +1203,11 @@ class TimelineWidget(QWidget):
         p.restore()
         p.setPen(QPen(QColor(255, 255, 255) if selected else col, 2 if selected else 1))
         p.setBrush(Qt.NoBrush); p.drawRect(r)
-        if selected:                               # maniglie delle dissolvenze
+        if selected:
             p.setBrush(QColor(255, 255, 255)); p.setPen(Qt.NoPen)
             p.drawEllipse(QPointF(r.left() + fi, r.top() + 6), 4, 4)
             p.drawEllipse(QPointF(r.right() - fo, r.top() + 6), 4, 4)
 
-    # --- hit test ---
     def hit_test(self, pos):
         tracks = self.m.mt_project['tracks']
         ti = int(pos.y() // self.TH)
@@ -1367,7 +1224,6 @@ class TimelineWidget(QWidget):
             return ('move', ti, c)
         return None
 
-    # --- mouse ---
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton: return
         m = self.m; pos = e.position()
@@ -1375,7 +1231,7 @@ class TimelineWidget(QWidget):
         if hit:
             kind, ti, c = hit
             m.mt_select_clip(c['id'], ti)
-            m.mt_checkpoint()                      # un solo punto di annullamento per l'intero trascinamento
+            m.mt_checkpoint()
             self.drag = {'kind': kind, 'id': c['id'], 'x0': pos.x(), 'orig': dict(c), 'changed': False}
         else:
             m.mt_select_clip(None, max(0, min(int(pos.y() // self.TH), len(m.mt_project['tracks']) - 1)))
@@ -1459,7 +1315,6 @@ class TimelineWidget(QWidget):
             a = QAction(label, self); a.triggered.connect(fn); menu.addAction(a)
         menu.exec(e.globalPos())
 
-    # --- drop dal Clip Bin / dal file manager ---
     def dragEnterEvent(self, e):
         md = e.mimeData()
         if md.hasFormat(CLIP_MIME) or md.hasUrls(): e.acceptProposedAction()
@@ -1483,19 +1338,17 @@ class RndSndApp(QMainWindow):
         self.resize(1600, 950)
         self.init_db()
 
-        # Defaults tema (servono prima di costruire le schede)
         self.canvas_bg, self.wf_color, self.cursor_color = '#1e1e1e', '#ff9800', 'white'
         self.current_theme = "Dark"
 
-        # Audio Engine (Library Editor)
         self.player = QMediaPlayer()
         self.audio_output = QAudioOutput()
         self.player.setAudioOutput(self.audio_output)
         self.audio_output.setVolume(1.0)
         self.player.playbackStateChanged.connect(self.on_player_state)
         self.player.mediaStatusChanged.connect(self.on_media_status)
-        self.play_once_end = None     # fine del clip in riproduzione singola
-        self._pending_clip = None     # inizio del clip da suonare appena il file e' caricato
+        self.play_once_end = None
+        self._pending_clip = None
         self._loading_clips = False
         self.audio_data = None
         self.current_path = ""
@@ -1507,14 +1360,13 @@ class RndSndApp(QMainWindow):
         self.wf_artist = None
         self.span = None
         self.current_browsing_path = ""
-        self._tasks = []          # thread in esecuzione (riferimenti vivi)
+        self._tasks = []
         self.scan_thread = None
         self.mix_task = None
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_playhead_and_loop)
 
-        # Main Layout
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.main_layout = QVBoxLayout(self.central_widget)
@@ -1530,9 +1382,7 @@ class RndSndApp(QMainWindow):
         self.setup_multitrack_tab()
 
         QShortcut(QKeySequence("Ctrl+B"), self, activated=self.add_clip_from_selection)
-        self.ai_task = None
         self.switch_theme("Dark")
-        self.refresh_ai_status()
 
     def init_db(self):
         conn = sqlite3.connect(DB_PATH)
@@ -1549,7 +1399,6 @@ class RndSndApp(QMainWindow):
         conn.close()
 
     def _start_task(self, task):
-        """Tiene un riferimento al thread finché non finisce."""
         self._tasks.append(task)
         task.finished.connect(lambda t=task: self._tasks.remove(t) if t in self._tasks else None)
         task.start()
@@ -1559,8 +1408,6 @@ class RndSndApp(QMainWindow):
         self.title_label = QLabel(f"<h2>rndsnd v{APP_VERSION}</h2>")
         header.addWidget(self.title_label)
         header.addStretch()
-        self.ai_lbl = QLabel(""); header.addWidget(self.ai_lbl)
-        self.ai_btn = QPushButton(""); self.ai_btn.clicked.connect(self.on_ai_button); header.addWidget(self.ai_btn)
         header.addSpacing(20)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["Dark", "Light"])
@@ -1597,7 +1444,6 @@ class RndSndApp(QMainWindow):
         layout = QHBoxLayout(tab)
         main_splitter = QSplitter(Qt.Horizontal)
 
-        # 1. LEFT: SYSTEM TREE
         tree_frame = QFrame()
         tree_layout = QVBoxLayout(tree_frame)
         tree_layout.setContentsMargins(0, 0, 0, 0)
@@ -1623,12 +1469,11 @@ class RndSndApp(QMainWindow):
         tree_layout.addWidget(self.tree)
         main_splitter.addWidget(tree_frame)
 
-        # 2. RIGHT: CONTENT
         right_frame = QFrame()
         right_layout = QVBoxLayout(right_frame)
 
         self.scan_info_lbl = QLabel("Select a folder to view files.")
-        self.scan_info_lbl.setWordWrap(True)      # i messaggi lunghi (es. errori dell'IA) devono restare leggibili
+        self.scan_info_lbl.setWordWrap(True)
         self.scan_progress = QProgressBar()
         self.scan_progress.setVisible(False)
         right_layout.addWidget(self.scan_info_lbl)
@@ -1650,13 +1495,11 @@ class RndSndApp(QMainWindow):
         self.file_table.setColumnWidth(0, 250); self.file_table.setColumnWidth(1, 220)
         self.file_table.setColumnWidth(2, 70); self.file_table.setColumnWidth(3, 80); self.file_table.setColumnWidth(4, 60)
         self.file_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        # solo la colonna Tags e' modificabile (le altre celle non hanno il flag ItemIsEditable)
         self.file_table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.file_table.itemClicked.connect(self.load_selected_file)
         self.file_table.itemChanged.connect(self.on_tags_edited)
         self.file_table.setSortingEnabled(True)
         hdr.setSortIndicator(0, Qt.AscendingOrder)
-        # il flag "riga nascosta" non segue le righe quando si riordina: si riapplica il filtro dopo l'ordinamento
         hdr.sortIndicatorChanged.connect(lambda *_: QTimer.singleShot(0, lambda: self.filter_file_table(self.search_bar.text())))
         right_layout.addWidget(self.file_table)
 
@@ -1702,7 +1545,6 @@ class RndSndApp(QMainWindow):
             self.file_table.setRowHidden(row, not match)
 
     def editor_visible_paths(self, text="", bpm_min=0, bpm_max=0, keys=None):
-        """Percorsi delle righe visibili nella tabella dell'Editor, opz. filtrate per testo, BPM e tonalita'."""
         text = text.lower(); out = []
         for row in range(self.file_table.rowCount()):
             if self.file_table.isRowHidden(row): continue
@@ -1722,7 +1564,6 @@ class RndSndApp(QMainWindow):
         return out
 
     def on_tags_edited(self, item):
-        """Salva nel database i tag modificati a mano (colonna 1)."""
         if self._populating or item.column() != 1: return
         cell = self.file_table.item(item.row(), 0)
         path = cell.data(Qt.UserRole) if cell else None
@@ -1758,104 +1599,16 @@ class RndSndApp(QMainWindow):
             menu.addAction(bpm_action)
             menu.exec(self.tree.viewport().mapToGlobal(position))
 
-    # --- stato e download dell'IA ---
-    def refresh_ai_status(self):
-        st = ai_status(); self.ai_state = st
-        downloading = self.ai_task is not None
-        if downloading:
-            self.ai_lbl.setText("🧠 AI: downloading model..."); self.ai_btn.setText("✖ Cancel download"); self.ai_btn.setVisible(True)
-        elif st == 'ready':
-            self.ai_lbl.setText("🧠 AI: ready"); self.ai_btn.setVisible(False)
-        elif st == 'need_model':
-            self.ai_lbl.setText("🧠 AI: model not downloaded"); self.ai_btn.setText("⬇ Download AI model (~330 MB)"); self.ai_btn.setVisible(True)
-        else:
-            self.ai_lbl.setText("🧠 AI: not installed"); self.ai_btn.setText("How to enable the AI"); self.ai_btn.setVisible(True)
-        # senza questo, con la finestra stretta etichetta e pulsante si schiacciano e il testo viene tagliato
-        self.ai_lbl.setMinimumWidth(self.ai_lbl.fontMetrics().horizontalAdvance(self.ai_lbl.text()) + 24)
-        self.ai_btn.setMinimumWidth(self.ai_btn.fontMetrics().horizontalAdvance(self.ai_btn.text()) + 40)
-
-    AI_INSTALL_HELP = ("The AI tagging needs PyTorch and panns-inference, which are not installed in this Python.\n\n"
-                       "In a terminal:\n    pip install torch panns-inference\n\n"
-                       "(For a smaller CPU-only PyTorch:  pip install torch --index-url https://download.pytorch.org/whl/cpu )\n\n"
-                       "Then restart rndsnd. The ~330 MB model is downloaded from inside the program with the button in the top bar. "
-                       "Until then, files are scanned without AI and tagged \"No AI\".")
-
-    def on_ai_button(self):
-        if self.ai_task is not None:
-            self.ai_task.cancel(); self.scan_info_lbl.setText("⏹ Cancelling download (the partial file is kept)..."); return
-        if self.ai_state == 'need_model': self.ai_download()
-        elif self.ai_state == 'missing_libs': QMessageBox.information(self, "Enable the AI", self.AI_INSTALL_HELP)
-
-    def ai_download(self, then=None):
-        """Scarica etichette e modello (~330 MB) dentro il programma, con avanzamento e ripresa. Niente wget."""
-        if self.ai_task is not None: return
-
-        def work(ctx):
-            os.makedirs(PANNS_DIR, exist_ok=True)
-            if not (os.path.isfile(PANNS_LABELS) and os.path.getsize(PANNS_LABELS) > 0):
-                ctx.status.emit("⬇ Downloading AI labels...")
-                download_file(PANNS_LABELS_URL, PANNS_LABELS, check=ctx.check, min_bytes=1000)
-            if not (os.path.isfile(PANNS_CKPT) and os.path.getsize(PANNS_CKPT) >= PANNS_CKPT_MIN):
-                def prog(done, total):
-                    if total: ctx.progress.emit(int(done / total * 100))
-                    ctx.status.emit(f"⬇ Downloading AI model: {done / 1e6:.0f}" + (f" / {total / 1e6:.0f} MB" if total else " MB"))
-                download_file(PANNS_CKPT_URL, PANNS_CKPT, progress=prog, check=ctx.check, min_bytes=PANNS_CKPT_MIN)
-            return True
-
-        task = TaskThread(work)
-        task.progress.connect(self.scan_progress.setValue); task.status.connect(self.scan_info_lbl.setText)
-        task.done.connect(lambda _r: self._ai_download_finished(None, then))
-        task.failed.connect(lambda msg: self._ai_download_finished(msg, None))
-        self.ai_task = task
-        self.scan_progress.setValue(0); self.scan_progress.setVisible(True)
-        self.refresh_ai_status(); self._start_task(task)
-
-    def _ai_download_finished(self, error, then):
-        self.ai_task = None; self.scan_progress.setVisible(False); self.refresh_ai_status()
-        if error == "cancelled":
-            self.scan_info_lbl.setText("⏹ Download cancelled. Press the button again to resume where it stopped.")
-        elif error:
-            self.scan_info_lbl.setText(f"❌ AI model download failed: {error}")
-        else:
-            self.scan_info_lbl.setText("✅ AI model downloaded. It is loaded the first time you scan a folder.")
-            if then: then()
-
-    def _ask_model_choice(self):
-        """Il modello manca: 'download' | 'noai' | 'cancel'."""
-        box = QMessageBox(self); box.setWindowTitle("AI model not downloaded")
-        box.setText("The AI model (~330 MB) has not been downloaded yet.\n\nDownload it now, or scan without AI tags (files are tagged \"No AI\" and can be re-analyzed later)?")
-        b_dl = box.addButton("Download now", QMessageBox.AcceptRole)
-        b_no = box.addButton("Scan without AI", QMessageBox.DestructiveRole)
-        box.addButton("Cancel", QMessageBox.RejectRole)
-        box.exec(); c = box.clickedButton()
-        return 'download' if c is b_dl else ('noai' if c is b_no else 'cancel')
-
     def start_scan(self, folder_path, mode="ai"):
         if self.scan_thread is not None and self.scan_thread.isRunning():
             self.scan_info_lbl.setText("⏳ A scan is already running...")
             return
-        use_ai = True
-        if mode in ("ai", "retag"):
-            st = ai_status()
-            if st == 'need_model':
-                choice = self._ask_model_choice() if mode == "ai" else 'download'
-                if choice == 'cancel': return
-                if choice == 'download':
-                    if self.ai_task is not None:
-                        self.scan_info_lbl.setText("⏳ The AI model is still downloading..."); return
-                    self.ai_download(then=lambda: self.start_scan(folder_path, mode)); return
-                use_ai = False
-            elif st == 'missing_libs':
-                if mode == "retag": self.scan_info_lbl.setText("⚠️ The AI is not installed: use the 'How to enable the AI' button."); return
-                use_ai = False
         self.scan_progress.setVisible(True)
         self.scan_progress.setValue(0)
         label = {"bpm": "Analyzing BPM/Key", "retag": "Re-running AI"}.get(mode, "Scanning")
         self.scan_info_lbl.setText(f"{label}: {folder_path}...")
         self.scan_thread = (AnalyzeWorker(folder_path) if mode == "bpm"
-                            else ScanWorker(folder_path, use_ai=use_ai, retag=(mode == "retag")))
-        if mode == "ai" and not use_ai and ai_status() == 'missing_libs':
-            self.scan_thread.ai_error = "PyTorch / panns-inference not installed"
+                            else ScanWorker(folder_path, use_ai=True, retag=(mode == "retag")))
         self.scan_thread.progress.connect(self.scan_progress.setValue)
         self.scan_thread.log.connect(self.scan_info_lbl.setText)
         self.scan_thread.scan_done.connect(lambda count: self.on_scan_completed(count, folder_path, mode))
@@ -1874,10 +1627,9 @@ class RndSndApp(QMainWindow):
             self.scan_info_lbl.setText(msg)
         if self.current_browsing_path == path:
             self.update_table_from_db(path)
-        self.refresh_ai_status()
 
     def update_table_from_db(self, folder_path):
-        prefix = folder_prefix(folder_path)   # "Music" non include "Music2" e % _ non sono jolly
+        prefix = folder_prefix(folder_path)
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("SELECT filename, tags, duration, size, path, bpm, tonality FROM files WHERE substr(path, 1, ?) = ?",
@@ -1894,7 +1646,7 @@ class RndSndApp(QMainWindow):
         hdr = self.file_table.horizontalHeader()
         sort_col, sort_ord = hdr.sortIndicatorSection(), hdr.sortIndicatorOrder()
         self._populating = True
-        self.file_table.setSortingEnabled(False)       # senza questo le righe si spostano mentre si riempie
+        self.file_table.setSortingEnabled(False)
         self.file_table.setUpdatesEnabled(False)
         self.file_table.setRowCount(len(rows))
         ro = ~Qt.ItemIsEditable
@@ -1918,27 +1670,24 @@ class RndSndApp(QMainWindow):
         self._populating = False
         self.filter_file_table(self.search_bar.text())
 
-    # --- caricamento file nell'editor ---
     def load_selected_file(self, item):
         cell = self.file_table.item(item.row(), 0)
         path = cell.data(Qt.UserRole) if cell else None
         self.load_audio_path(path)
 
     def load_audio_path(self, path):
-        """Carica un file nell'editor (forma d'onda + player). Ritorna True se riuscito."""
         if not path or not os.path.exists(path):
             self.scan_info_lbl.setText("⚠️ File not found on disk.")
             return False
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             try:
-                # soundfile a blocchi: memoria = solo il mono (float32), niente picco doppio
                 chunks = [blk.mean(axis=1).astype(np.float32)
                           for blk in sf.blocks(path, blocksize=1 << 16, dtype='float32', always_2d=True)]
                 data = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
                 sr = sf.info(path).samplerate
             except Exception:
-                data, sr = librosa.load(path, sr=None, mono=True)   # fallback (mp3/m4a ecc.)
+                data, sr = librosa.load(path, sr=None, mono=True)
                 data = data.astype(np.float32)
             if len(data) == 0: raise RuntimeError("file vuoto")
         except Exception as e:
@@ -1967,13 +1716,12 @@ class RndSndApp(QMainWindow):
         self.ax.clear()
         self.ax.set_facecolor(self.canvas_bg); self.figure.patch.set_facecolor(self.canvas_bg)
         self.wf_artist = None; self.playhead_line = None
-        self.ax.axis('off')   # niente assi 0-1 quando non c'è ancora un file
+        self.ax.axis('off')
         if self.audio_data is not None:
             self.ax.set_xlim(*(xl if xl else (0, self.duration)))
             self.ax.set_ylim(-1.1, 1.1)
             self.draw_envelope()
             self.playhead_line = self.ax.axvline(x=0, color=self.cursor_color, lw=2)
-        # FIX: dopo ax.clear() il SpanSelector va ricreato, altrimenti la selezione si rompe
         self.span = SpanSelector(self.ax, self.on_select, 'horizontal', useblit=True, minspan=0.02,
                                  props=dict(alpha=0.4, facecolor='#ff9800'), interactive=True, drag_from_anywhere=True)
         if self.is_looping and self.selection_range[1] > self.selection_range[0]:
@@ -1982,8 +1730,6 @@ class RndSndApp(QMainWindow):
         self.canvas.draw()
 
     def draw_envelope(self):
-        """FIX: prima si disegnava 1 campione ogni 100 (aliasing, picchi persi).
-        Ora inviluppo min/max ricalcolato sulla parte visibile (anche durante lo zoom)."""
         if self.wf_artist is not None:
             try: self.wf_artist.remove()
             except Exception: pass
@@ -2037,7 +1783,6 @@ class RndSndApp(QMainWindow):
             if pos_sec >= e: self.player.setPosition(int(s * 1000)); pos_sec = s
         if (self.play_once_end is not None and self.player.playbackState() == QMediaPlayer.PlayingState
                 and pos_sec >= self.play_once_end):
-            # clip suonato una volta sola: ferma a fine clip e torna all'inizio (un nuovo clic lo riascolta)
             self.player.pause(); self.play_once_end = None
             pos_sec = self.selection_range[0]; self.player.setPosition(int(pos_sec * 1000))
         if self.playhead_line:
@@ -2045,7 +1790,6 @@ class RndSndApp(QMainWindow):
             self.canvas.draw_idle()
 
     def on_player_state(self, state):
-        # FIX: il testo del pulsante restava "PAUSE" a fine file / cambio file
         if state == QMediaPlayer.PlayingState:
             self.btn_play.setText("⏸ PAUSE"); self.timer.start(30)
         else:
@@ -2055,7 +1799,7 @@ class RndSndApp(QMainWindow):
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
         else:
-            self.live_pause(); self.mt_pause()          # un solo audio alla volta
+            self.live_pause(); self.mt_pause()
             self.player.play()
 
     def stop_audio(self):
@@ -2073,16 +1817,14 @@ class RndSndApp(QMainWindow):
         return name[:60] or default
 
     def export_segment(self, path, s, e, base, dest=None):
-        """Esporta [s, e] secondi dal file ORIGINALE (stereo, 24 bit) in un WAV. Ritorna il percorso."""
         try:
             sr = sf.info(path).samplerate
             chunk, _ = sf.read(path, start=int(s * sr), stop=int(e * sr), dtype='float32', always_2d=True)
         except Exception:
-            y, sr = librosa.load(path, sr=None, mono=False, offset=s, duration=e - s)   # fallback (m4a ecc.)
+            y, sr = librosa.load(path, sr=None, mono=False, offset=s, duration=e - s)
             chunk = y.T if y.ndim > 1 else y[:, None]
         if len(chunk) == 0: raise RuntimeError("selezione vuota")
         if dest is None:
-            # cartella unica per ogni drag: il file mantiene il nome pulito (es. "Rumore pioggia.wav")
             folder = os.path.join(DRAG_DIR, str(time.time_ns() // 1000000))
             os.makedirs(folder, exist_ok=True)
             dest = os.path.join(folder, self.safe_filename(base) + ".wav")
@@ -2091,14 +1833,14 @@ class RndSndApp(QMainWindow):
 
     def _do_drag(self, source_widget, file_path, clip_id=None):
         drag = QDrag(source_widget); mime = QMimeData(); mime.setUrls([QUrl.fromLocalFile(file_path)])
-        if clip_id is not None: mime.setData(CLIP_MIME, str(clip_id).encode())   # per il drop interno sul Multitrack
+        if clip_id is not None: mime.setData(CLIP_MIME, str(clip_id).encode())
         drag.setMimeData(mime); drag.setPixmap(QPixmap(32, 32)); drag.exec(Qt.CopyAction)
 
     def start_drag_operation(self):
         if self.audio_data is None or not self.current_path: return
         try:
             if not self.is_looping:
-                tp = self.current_path       # nessuna selezione: si trascina il file ORIGINALE, senza ricodifiche
+                tp = self.current_path
             else:
                 s, e = self.selection_range
                 if e - s < 0.01: return
@@ -2109,9 +1851,6 @@ class RndSndApp(QMainWindow):
             return
         self._do_drag(self.btn_drag, tp)
 
-    # =================================================================
-    #  CLIP BIN  (parti di file salvate con un nome, legate al file originale)
-    # =================================================================
     def build_clip_panel(self):
         frame = QFrame(); lay = QVBoxLayout(frame); lay.setContentsMargins(0, 0, 0, 0)
         head = QLabel("🎞 CLIP BIN"); head.setStyleSheet("padding: 5px; background: #333; color: white;")
@@ -2144,7 +1883,6 @@ class RndSndApp(QMainWindow):
         return f"{int(sec // 60)}:{sec % 60:04.1f}"
 
     def clip_msg(self, text):
-        """Messaggio visibile sia nell'Editor sia nel Multitrack."""
         self.scan_info_lbl.setText(text)
         if hasattr(self, 'mt_status'): self.mt_status.setText(text)
 
@@ -2163,9 +1901,9 @@ class RndSndApp(QMainWindow):
         conn = sqlite3.connect(DB_PATH); cur = conn.cursor()
         cur.execute("SELECT id, name, path, start, end FROM clips ORDER BY id")
         all_rows = cur.fetchall(); conn.close()
-        self.clips = {cid: (name, path, st, en) for cid, name, path, st, en in all_rows}   # sempre TUTTI i clip
+        self.clips = {cid: (name, path, st, en) for cid, name, path, st, en in all_rows}
         rows = all_rows
-        if self.clip_only_current.isChecked():       # il filtro vale solo per l'elenco dell'Editor
+        if self.clip_only_current.isChecked():
             rows = sorted([r for r in all_rows if r[2] == self.current_path], key=lambda r: r[3])
         self._loading_clips = True
         self.clip_list.clear()
@@ -2174,7 +1912,7 @@ class RndSndApp(QMainWindow):
             it = self._make_clip_item(cid, name, path, st, en, True)
             self.clip_list.addItem(it)
             if cid == select_id: sel_item = it
-        if hasattr(self, 'mt_clip_list'):            # pannello del Multitrack: stessi clip, sola lettura
+        if hasattr(self, 'mt_clip_list'):
             self.mt_clip_list.clear()
             for cid, name, path, st, en in all_rows:
                 self.mt_clip_list.addItem(self._make_clip_item(cid, name, path, st, en, False))
@@ -2207,19 +1945,19 @@ class RndSndApp(QMainWindow):
         self.scan_info_lbl.setText(f"🎞 Clip added ({e - s:.1f}s). Type a name and press Enter.")
         it = self.clip_list.currentItem()
         if it is not None:
-            self.clip_list.editItem(it)      # si puo' scrivere subito il nome, come per le etichette di Audacity
+            self.clip_list.editItem(it)
 
     def on_clip_renamed(self, item):
         if self._loading_clips: return
         cid = item.data(Qt.UserRole)
         old = self.clips.get(cid, ("", "", 0, 0))[0]
         new = item.text().strip()
-        if not new:                           # nome vuoto non ammesso: si ripristina
+        if not new:
             self._loading_clips = True; item.setText(old); self._loading_clips = False; return
         conn = sqlite3.connect(DB_PATH)
         conn.execute("UPDATE clips SET name = ? WHERE id = ?", (new, cid)); conn.commit(); conn.close()
         n, p, s, e = self.clips[cid]; self.clips[cid] = (new, p, s, e)
-        if hasattr(self, 'mt_clip_list'):             # tiene allineato il pannello del Multitrack
+        if hasattr(self, 'mt_clip_list'):
             for i in range(self.mt_clip_list.count()):
                 mi = self.mt_clip_list.item(i)
                 if mi.data(Qt.UserRole) == cid: mi.setText(new)
@@ -2267,7 +2005,6 @@ class RndSndApp(QMainWindow):
             self.clip_msg(f"❌ Drag export failed: {ex}"); return
         self._do_drag(item.listWidget() or self.clip_list, tp, clip_id=item.data(Qt.UserRole))
 
-    # --- ascolto al clic ---
     def on_clip_clicked(self, item):
         cid = item.data(Qt.UserRole)
         if cid not in self.clips: return
@@ -2281,14 +2018,14 @@ class RndSndApp(QMainWindow):
         self.play_once_end = None if loop else e
         self.btn_drag.setText(f"📦 {e - s:.1f}s")
         xl = self.ax.get_xlim()
-        if s < xl[0] or e > xl[1]:            # il clip e' fuori dalla parte zoomata: si torna alla vista intera
+        if s < xl[0] or e > xl[1]:
             self.ax.set_xlim(0, self.duration); self.draw_envelope()
         try: self.span.extents = (s, e)
         except Exception: pass
         self.canvas.draw_idle()
-        self.live_pause(); self.mt_pause()    # un solo audio alla volta
+        self.live_pause(); self.mt_pause()
         if same: self._begin_clip_playback(s)
-        else: self._pending_clip = s          # il file e' appena stato caricato: si parte quando il player e' pronto
+        else: self._pending_clip = s
         self.scan_info_lbl.setText(f"▶ {name}")
 
     def _begin_clip_playback(self, s):
@@ -2304,7 +2041,7 @@ class RndSndApp(QMainWindow):
             self.scan_info_lbl.setText("❌ The player cannot open this file.")
 
     # =================================================================
-    #  MIXER TAB (offline, ora in un thread)
+    #  MIXER TAB
     # =================================================================
     def setup_mixer_tab(self):
         tab = QWidget()
@@ -2345,7 +2082,7 @@ class RndSndApp(QMainWindow):
         self.tabs.addTab(tab, "Mixer")
 
     def generate_mix(self):
-        if self.mix_task is not None:          # il pulsante diventa ANNULLA durante la generazione
+        if self.mix_task is not None:
             self.mix_task.cancel(); self.status_lbl.setText("⏹ Cancelling..."); return
 
         if self.radio_tags.isChecked():
@@ -2412,7 +2149,7 @@ class RndSndApp(QMainWindow):
         self.live_engine = LiveEngine(self)
         self.live_engine.reachedEnd.connect(self.live_on_end)
         self.live_sink = None
-        self.live_state = 'stopped'      # stopped | playing | paused
+        self.live_state = 'stopped'
         self.live_task = None
         self.live_lanes = []; self.live_audio = []; self.live_peaks = []; self.live_logs = []
         self.live_n = 0; self.live_seed = 0; self._live_gen = 0
@@ -2420,7 +2157,6 @@ class RndSndApp(QMainWindow):
 
         tab = QWidget(); root = QVBoxLayout(tab)
 
-        # riga 1: sorgenti + parametri
         r1 = QHBoxLayout()
         r1.addWidget(QLabel("Source:"))
         self.live_src_combo = QComboBox()
@@ -2445,7 +2181,6 @@ class RndSndApp(QMainWindow):
         r1.addWidget(self.live_gen_btn)
         root.addLayout(r1)
 
-        # riga 1b: filtri musicali (richiedono "Analyze BPM / Key" sulla cartella)
         r1b = QHBoxLayout()
         r1b.addWidget(QLabel("BPM from:"))
         self.live_bpm_min = QSpinBox(); self.live_bpm_min.setRange(0, 250); self.live_bpm_min.setSpecialValueText("any")
@@ -2475,7 +2210,6 @@ class RndSndApp(QMainWindow):
         for sig in (self.live_bpm.valueChanged, self.live_quant.currentIndexChanged, self.live_snap.toggled):
             sig.connect(lambda *_: self.live_update_grid())
 
-        # riga 2: trasporto
         r2 = QHBoxLayout()
         self.live_play_btn = QPushButton("▶ PLAY"); self.live_play_btn.clicked.connect(self.live_play_pause)
         self.live_stop_btn = QPushButton("⏹ STOP"); self.live_stop_btn.clicked.connect(self.live_stop)
@@ -2502,7 +2236,6 @@ class RndSndApp(QMainWindow):
         self.live_status = QLabel("Press NEW MIX to roll a random mix. Click a waveform to jump; M = mute, S = solo, 🎲 = re-roll a single layer.")
         root.addWidget(self.live_prog); root.addWidget(self.live_status)
 
-        # forma d'onda master + corsie
         self.live_master = WaveformWidget(130, ruler=True)
         self.live_master.seekRequested.connect(self.live_seek)
         root.addWidget(self.live_master, 2)
@@ -2528,7 +2261,6 @@ class RndSndApp(QMainWindow):
         self.live_master.set_theme(bg, '#ff9800', cur, grid, txt)
         for lane in self.live_lanes: lane.set_theme(bg, cur, grid, txt)
 
-    # --- sorgenti ---
     def live_filters(self):
         bmin, bmax = self.live_bpm_min.value(), self.live_bpm_max.value()
         if bmin and bmax and bmin > bmax: bmin, bmax = bmax, bmin
@@ -2556,7 +2288,6 @@ class RndSndApp(QMainWindow):
         out = sorted({r[0] for r in cur.fetchall()}); conn.close()
         return out
 
-    # --- griglia / quantizzazione ---
     def live_beat_frames(self): return max(1, int(round(60.0 / self.live_bpm.value() * MIX_SR)))
 
     def live_quant_frames(self):
@@ -2567,12 +2298,10 @@ class RndSndApp(QMainWindow):
         self.live_master.set_grid(60.0 / self.live_bpm.value() if show else 0.0)
 
     def live_next_grid(self, unit):
-        """Prossimo punto della griglia (in frame del flusso audio); n = al giro di loop."""
         n = self.live_engine.n
         t = (self.live_engine.pos // unit + 1) * unit
         return min(t, n)
 
-    # --- generazione ---
     def _live_set_buttons(self):
         busy = self.live_task is not None
         has = self.live_engine.n > 0
@@ -2590,7 +2319,6 @@ class RndSndApp(QMainWindow):
         if self.live_task is None: self._live_run([idx])
 
     def _live_run(self, indices):
-        """indices=None -> nuovo mix completo; altrimenti rigenera solo quei layer."""
         src = self.live_collect_sources()
         if not src:
             bmin, bmax, keys = self.live_filters()
@@ -2600,7 +2328,7 @@ class RndSndApp(QMainWindow):
         grid = self.live_beat_frames() if self.live_snap.isChecked() else 0
         if new_mix:
             n_frames = self.live_dur.value() * MIX_SR; L = self.live_nlayers.value(); indices = list(range(L))
-            if grid:   # la durata diventa un numero intero di battute, cosi' il loop resta a tempo
+            if grid:
                 bar = grid * 4; n_frames = max(bar, int(round(n_frames / bar)) * bar)
         else:
             n_frames = self.live_n; L = len(self.live_lanes)
@@ -2660,13 +2388,13 @@ class RndSndApp(QMainWindow):
                     self.live_refresh_display()
                 if when is None:
                     self.live_engine.replace(idx, audio); show()
-                else:   # il layer nuovo entra sul prossimo battito / battuta, sample-accurate
+                else:
                     self.live_engine.schedule(when, 'replace', (idx, audio))
                     ms = max(0, int((when - self.live_engine.pos) / MIX_SR * 1000))
                     QTimer.singleShot(ms, show)
                     note = f" — enters on the next {self.live_quant.currentText()} ({ms / 1000:.1f}s)"
         if res['new_mix']: self.live_mix_changed_all()
-        else: self.live_refresh_display()   # non tocca mute/solo ancora in attesa di quantizzazione
+        else: self.live_refresh_display()
         self.live_time_lbl.setText(f"00:00 / {fmt_time(self.live_n / MIX_SR)}")
         self.live_status.setText(f"✅ {'New mix' if res['new_mix'] else 'Layer re-rolled'} ready from {res.get('nsrc', '?')} files "
                                  f"({len(self.live_lanes)} layers, {self.live_n / MIX_SR:.1f}s, seed {res['seed']}){note}.")
@@ -2699,7 +2427,6 @@ class RndSndApp(QMainWindow):
                 [l.solo() for l in self.live_lanes])
 
     def live_refresh_display(self):
-        """Inviluppo master (stimato dai picchi dei layer, istantaneo) e corsie attenuate."""
         if not self.live_lanes: return
         eff = compute_eff(*self._live_ui_state())
         mn = sum(g * pk[:, 0] for g, pk in zip(eff, self.live_peaks))
@@ -2708,17 +2435,16 @@ class RndSndApp(QMainWindow):
         for g, lane in zip(eff, self.live_lanes): lane.wave.set_dim(g == 0)
 
     def live_mix_changed_all(self):
-        """Applica subito l'intero stato (dopo un nuovo mix / a riproduzione ferma)."""
         if not self.live_lanes: return
         self.live_engine.set_state(*self._live_ui_state())
         self.live_refresh_display()
 
-    def live_gain_changed(self):            # fader: sempre immediato
+    def live_gain_changed(self):
         if not self.live_lanes: return
         self.live_engine.set_gains(self._live_ui_state()[0])
         self.live_refresh_display()
 
-    def live_toggle_changed(self):          # mute / solo: sul prossimo battito se "Quantize" e' attivo
+    def live_toggle_changed(self):
         if not self.live_lanes: return
         user, mute, solo = self._live_ui_state()
         q = self.live_quant_frames()
@@ -2728,7 +2454,6 @@ class RndSndApp(QMainWindow):
             self.live_engine.set_state(user, mute, solo)
         self.live_refresh_display()
 
-    # --- trasporto ---
     def _live_ensure_sink(self):
         if self.live_sink is not None: return True
         try:
@@ -2751,7 +2476,7 @@ class RndSndApp(QMainWindow):
         if self.live_engine.n == 0: return
         if self.live_state == 'playing': self.live_pause(); return
         if not self._live_ensure_sink(): return
-        self.player.pause(); self.mt_pause()      # ferma l'anteprima dell'Editor e il multitraccia
+        self.player.pause(); self.mt_pause()
         if self.live_state == 'paused':
             self.live_sink.resume()
         else:
@@ -2784,14 +2509,13 @@ class RndSndApp(QMainWindow):
     def live_tick(self):
         n = self.live_engine.n
         if n <= 0: return
-        pos = self.live_engine.pos - int(0.075 * MIX_SR)   # compensa circa metà del buffer audio
+        pos = self.live_engine.pos - int(0.075 * MIX_SR)
         pos = pos % n if self.live_engine.loop else max(0, pos)
         frac = pos / n
         self.live_master.set_playhead(frac)
         for lane in self.live_lanes: lane.wave.set_playhead(frac)
         self.live_time_lbl.setText(f"{fmt_time(pos / MIX_SR)} / {fmt_time(n / MIX_SR)}")
 
-    # --- salvataggio (renderizza esattamente quello che senti: mute/solo/volumi inclusi) ---
     def live_save(self):
         if self.live_engine.n == 0 or self.live_task is not None: return
         layers = list(self.live_audio); eff = self.live_engine.eff_gains()
@@ -2814,15 +2538,14 @@ class RndSndApp(QMainWindow):
         self.live_save_btn.setEnabled(False)
         self._start_task(task)
 
-
     # =================================================================
-    #  MULTITRACK TAB  (montaggio non distruttivo dei clip)
+    #  MULTITRACK TAB
     # =================================================================
     def mt_init_state(self):
         self.mt_project = new_project()
-        self.mt_media = {}                 # (path, a, b) -> MtMedia
-        self.mt_pps = 60.0                 # pixel per secondo
-        self.mt_x0 = 0.0                   # secondo all'estremo sinistro della vista
+        self.mt_media = {}
+        self.mt_pps = 60.0
+        self.mt_x0 = 0.0
         self.mt_playhead = 0.0
         self.mt_sel_clip = None; self.mt_sel_track = 0
         self.mt_undo = []; self.mt_redo = []; self._mt_last_key = None; self._mt_last_t = 0.0
@@ -2938,7 +2661,6 @@ class RndSndApp(QMainWindow):
         self.mt_update_props()
 
     def build_mt_clip_panel(self):
-        """Copia del Clip Bin dentro il Multitrack: i clip si trascinano direttamente sulle tracce."""
         frame = QFrame(); lay = QVBoxLayout(frame); lay.setContentsMargins(0, 0, 0, 0)
         head = QLabel("🎞 CLIP BIN"); head.setStyleSheet("padding: 5px; background: #333; color: white;")
         hint = QLabel("Drag a clip onto a track,\nor double-click it to insert at the cursor\non the selected track.")
@@ -2971,7 +2693,6 @@ class RndSndApp(QMainWindow):
             self.mt_theme = dict(bg='#fafafa', lane_alt='#f0f0f0', lane_sel='#e4e4e4', grid='#bbbbbb', text='#222222', ruler='#e0e0e0', cursor='#000000')
         self.mt_timeline.update(); self.mt_ruler.update()
 
-    # --- tracce e selezione ---
     def mt_rebuild_headers(self):
         while self.mt_headers_lay.count():
             it = self.mt_headers_lay.takeAt(0)
@@ -3028,9 +2749,7 @@ class RndSndApp(QMainWindow):
         if self.mt_sel_clip is not None and not self.mt_find_clip(self.mt_sel_clip): self.mt_sel_clip = None
         self.mt_rebuild_headers(); self.mt_changed(); self.mt_update_props()
 
-    # --- annulla / ripeti ---
     def mt_checkpoint(self, key=None):
-        """Salva lo stato PRIMA di una modifica. Con `key`, modifiche ripetute ravvicinate (slider) = un solo annulla."""
         now = time.time()
         if key is not None and key == self._mt_last_key and now - self._mt_last_t < 1.0:
             self._mt_last_t = now; return
@@ -3055,7 +2774,6 @@ class RndSndApp(QMainWindow):
         self.mt_undo.append(json.dumps(self.mt_project)); self._mt_restore(self.mt_redo.pop())
         self.mt_status.setText("↷ Redone.")
 
-    # --- aggiornamento ---
     def mt_changed(self):
         items = build_snapshot(self.mt_project, self.mt_media)
         self.mt_engine.set_items(items, int(round(mt_length(self.mt_project) * MIX_SR)))
@@ -3089,7 +2807,6 @@ class RndSndApp(QMainWindow):
         self.mt_changed()
         self.mt_clip_lbl.setText(f"🎞 {c['name']}  ({c['len']:.2f} s @ {c['pos']:.2f} s)")
 
-    # --- vista: zoom, scorrimento, cursore ---
     def mt_visible_sec(self): return max(1, self.mt_timeline.width()) / self.mt_pps
 
     def mt_update_scrollbar(self):
@@ -3122,7 +2839,6 @@ class RndSndApp(QMainWindow):
         self.mt_update_time_label(); self.mt_timeline.update(); self.mt_ruler.update()
 
     def mt_snap_time(self, t, exclude_id, tol):
-        """Punto di aggancio piu' vicino a t entro `tol` secondi (bordi dei clip, cursore, griglia), oppure None."""
         if not self.mt_project.get('snap'): return None
         cands = [0.0, self.mt_playhead]
         for tr in self.mt_project['tracks']:
@@ -3133,7 +2849,6 @@ class RndSndApp(QMainWindow):
         best = min(cands, key=lambda x: abs(x - t))
         return best if abs(best - t) <= tol else None
 
-    # --- inserimento clip ---
     def mt_ensure_media(self, path, a, b):
         key = media_key(path, a, b)
         if key in self.mt_media: return True
@@ -3185,7 +2900,6 @@ class RndSndApp(QMainWindow):
         self.mt_add_clip(name if (s, e) == (0.0, self.duration) else f"{name} {self.fmt_pos(s)}", self.current_path, s, e,
                          self.mt_sel_track, self.mt_playhead)
 
-    # --- modifica ---
     def _mt_selected(self):
         f = self.mt_find_clip(self.mt_sel_clip) if self.mt_sel_clip is not None else None
         return f
@@ -3194,7 +2908,7 @@ class RndSndApp(QMainWindow):
         t = self.mt_playhead
         f = self._mt_selected()
         if not f or not (f[1]['pos'] + 0.02 < t < f[1]['pos'] + f[1]['len'] - 0.02):
-            f = None                                 # altrimenti: clip sotto il cursore nella traccia selezionata
+            f = None
             for c in self.mt_project['tracks'][self.mt_sel_track]['clips']:
                 if c['pos'] + 0.02 < t < c['pos'] + c['len'] - 0.02: f = (self.mt_sel_track, c); break
         if not f: self.mt_status.setText("ℹ️ Place the cursor inside a clip (click the ruler or timeline) to split it."); return
@@ -3237,7 +2951,6 @@ class RndSndApp(QMainWindow):
         if not f: return
         self.mt_checkpoint(); f[1]['name'] = name; self.mt_changed(); self.mt_update_props()
 
-    # --- riproduzione ---
     def _mt_ensure_sink(self):
         if self.mt_sink is not None: return True
         try:
@@ -3254,7 +2967,7 @@ class RndSndApp(QMainWindow):
         if self.mt_state == 'playing': self.mt_pause(); return
         if self.mt_engine.length <= 0: self.mt_status.setText("ℹ️ The timeline is empty: add some clips first."); return
         if not self._mt_ensure_sink(): return
-        self.player.pause(); self.live_pause()          # un solo audio alla volta
+        self.player.pause(); self.live_pause()
         if self.mt_state == 'paused':
             self.mt_sink.resume()
         else:
@@ -3273,7 +2986,7 @@ class RndSndApp(QMainWindow):
         if self.mt_sink is not None and self.mt_state != 'stopped': self.mt_sink.stop()
         was = self.mt_state != 'stopped'
         self.mt_state = 'stopped'; self.mt_play_btn.setText("▶ PLAY"); self.mt_timer.stop()
-        self.mt_seek(self._mt_origin if was else 0.0)     # come in Audacity: il cursore torna dove e' iniziata la riproduzione
+        self.mt_seek(self._mt_origin if was else 0.0)
 
     def mt_on_end(self):
         if not self.mt_engine.loop: self.mt_stop()
@@ -3283,11 +2996,10 @@ class RndSndApp(QMainWindow):
         t = max(0.0, (self.mt_engine.pos - int(0.075 * MIX_SR)) / MIX_SR)
         self.mt_playhead = t
         vis = self.mt_visible_sec()
-        if t < self.mt_x0 or t > self.mt_x0 + vis:           # il cursore esce dalla vista: la vista lo segue
+        if t < self.mt_x0 or t > self.mt_x0 + vis:
             self.mt_x0 = max(0.0, t - vis * 0.1); self.mt_update_scrollbar()
         self.mt_update_time_label(); self.mt_timeline.update(); self.mt_ruler.update()
 
-    # --- esportazione ---
     def mt_export(self):
         if self.mt_task is not None:
             self.mt_task.cancel(); self.mt_status.setText("⏹ Cancelling..."); return
@@ -3312,7 +3024,7 @@ class RndSndApp(QMainWindow):
                 ctx.check(); k = min(blk, n - p)
                 out[p:p + k] = mt_mix_block(items, p, k); ctx.progress.emit(int(p / n * 100))
             peak = float(np.abs(out).max()); note = ""
-            if peak > 1.0:                                   # somma oltre 0 dB: si abbassa tutto invece di distorcere
+            if peak > 1.0:
                 out *= 0.98 / peak; note = f" — peaks exceeded 0 dB, whole mix lowered by {20 * math.log10(peak / 0.98):.1f} dB"
             ctx.status.emit("💾 Encoding...")
             path, n2 = export_mix(out, name, header, logs, soft=False)
@@ -3330,7 +3042,6 @@ class RndSndApp(QMainWindow):
     def _mt_export_failed(self, msg):
         self._mt_export_ui(); self.mt_status.setText("⏹ Cancelled." if msg == "cancelled" else f"❌ {msg}")
 
-    # --- salvataggio / apertura progetto ---
     def mt_save_project(self, path=None):
         if not path:
             os.makedirs(os.path.join(APP_DIR, "projects"), exist_ok=True)
